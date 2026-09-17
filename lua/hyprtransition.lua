@@ -29,14 +29,17 @@
 local M = {}
 
 local defaults = {
-	mod = "ALT",
-	effect = "tear", -- name in an effects/ dir, or a list to pick from at random
+	effect = "tear", -- name in an effects dir, or a list to pick from at random
 	duration = nil, -- ms; nil = the effect's own "// duration:" line
-	workspaces = 5, -- keys 1..workspaces; must match split_monitor_workspaces.count if used
-	bin = "hyprtransition", -- the binary; anything your shell can find
-	bind_keys = true, -- false: don't touch binds, call HyprTransition.go(i) / cycle(dir) yourself
+	cursor = false, -- include the mouse cursor in the captured screen
+	keys = {
+		mod = "ALT",
+		workspaces = 5, -- keys 1..workspaces; must match split_monitor_workspaces.count if used
+		bind = true, -- false: don't touch binds, call HyprTransition.go(i) / cycle(dir) yourself
+	},
 	fallback_ms = 400, -- if the overlay never shows up (binary missing?), switch anyway after this
 	disable_workspace_animation = true,
+	bin = "hyprtransition", -- the binary; anything your shell can find
 }
 
 -- ---------------------------------------------------------------- config file
