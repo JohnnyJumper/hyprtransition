@@ -162,6 +162,25 @@ hyprtransition [-e EFFECT] [-o OUTPUT] [-d MS] [-s SEED] [-c] [--loop] [--then C
   the physical resolution and is pixel-exact).
 - With split-monitor-workspaces, `workspaces` must match the plugin's `count`.
 
+## Why isn't this a hyprpm plugin?
+
+It could be, and a native version would be better in two real ways: no
+per-switch startup cost, and effects could receive the *new* workspace as a
+texture too (cube rotations, page curls, crossfades).
+
+It isn't, for now, because a hyprpm plugin is a C++ `.so` compiled against your
+exact Hyprland commit and loaded into the compositor. A transition plugin has
+to render workspaces offscreen and inject raw GL into the render pass — the
+least stable part of the plugin API — and as of 0.56 Hyprland is mid-refactor
+toward an abstract renderer with a Vulkan backend (`IHyprRenderer::RT_VK`).
+Anything written against the GL render pass today would be written twice, and
+a plugin crash takes the whole session with it.
+
+This standalone version uses only stable Wayland protocols and survives every
+Hyprland update untouched. The effect file format is designed so a native
+backend can adopt it later (same `effect(uv, t)` contract, plus a second
+texture) once the renderer settles.
+
 ## License
 
 MIT
