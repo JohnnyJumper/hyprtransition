@@ -12,6 +12,19 @@ workspace layout or your plugins. It reacts to the workspace *changing* —
 however that happened: keys, scroll, waybar, `hyprctl`, split-monitor-workspaces,
 anything — and turning it off is deleting one line.
 
+## Previews
+
+| `tear` | `burn` | `tiles` |
+|---|---|---|
+| ![tear](docs/previews/tear.gif) | ![burn](docs/previews/burn.gif) | ![tiles](docs/previews/tiles.gif) |
+| `blackhole` | `page` | `squash` |
+| ![blackhole](docs/previews/blackhole.gif) | ![page](docs/previews/page.gif) | ![squash](docs/previews/squash.gif) |
+| `glitch` | `melt` | `_template` (a plain fade) |
+| ![glitch](docs/previews/glitch.gif) | ![melt](docs/previews/melt.gif) | ![_template](docs/previews/_template.gif) |
+
+Recorded live with `wf-recorder`, real workspace switches, default durations
+(`scripts/record-previews.py`).
+
 ## How it works
 
 `hyprtransition` is a small standalone program. On a workspace switch it:
