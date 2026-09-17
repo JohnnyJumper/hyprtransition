@@ -1,6 +1,6 @@
 -- hyprtransition — purely visual workspace transitions for Hyprland's Lua config.
 --
--- Usage (last line of your hyprland.lua, after your keybinds):
+-- Usage (anywhere in your hyprland.lua):
 --
 --     require("hyprtransition").setup()           -- system install (module is on the Lua path)
 --
@@ -9,22 +9,22 @@
 --
 -- Settings come from ~/.config/hyprtransition/config.lua (see config.example.lua);
 -- anything passed to setup({ ... }) overrides the file, e.g. setup({ effect = "burn" }).
--- Remove that line to turn it off. All options and their defaults are in
--- `defaults` below. The module takes over `keys.mod + 1..keys.workspaces` and
--- `mod + 0` / `mod + 9` (next/prev), hides the overlay from your layer
--- animations, and disables the built-in `workspaces` animation (the effect
--- replaces it). The workspace switch itself is whatever you already use:
--- split-monitor-workspaces if it is loaded, plain workspace dispatch otherwise.
+-- Remove the line to turn it off.
+--
+-- It knows nothing about your keys, your workspace count or your plugins: it
+-- reacts to the workspace *changing*, however that happened (keys, scroll,
+-- waybar, hyprctl, a plugin's dispatcher).
+--
+-- How: Hyprland fires `workspace.active` synchronously inside the switch,
+-- before anything has been drawn. We step back to the old workspace right there
+-- (invisible), spawn `hyprtransition` to screenshot it and cover the monitor
+-- with a click-through overlay, and the moment Hyprland reports that overlay
+-- as opened we switch forward underneath it. The effect then reveals it.
 --
 -- At runtime, from a bind or a terminal (a `hyprctl reload` resets to setup()):
 --
 --     hyprctl dispatch '(function() HyprTransition.enabled = not HyprTransition.enabled return hl.dsp.no_op() end)()'
 --     hyprctl dispatch '(function() HyprTransition.effect = "burn" return hl.dsp.no_op() end)()'
---
--- How it works: the key spawns `hyprtransition`, which screenshots the focused
--- monitor and covers it with a click-through overlay showing that screenshot.
--- The moment Hyprland reports the overlay as opened, the real switch is
--- dispatched underneath it, and the effect reveals the new workspace.
 
 local M = {}
 
@@ -32,13 +32,8 @@ local defaults = {
 	effect = "tear", -- name in an effects dir, or a list to pick from at random
 	duration = nil, -- ms; nil = the effect's own "// duration:" line
 	cursor = false, -- include the mouse cursor in the captured screen
-	keys = {
-		mod = "ALT",
-		workspaces = 5, -- keys 1..workspaces; must match split_monitor_workspaces.count if used
-		bind = true, -- false: don't touch binds, call HyprTransition.go(i) / cycle(dir) yourself
-	},
 	fallback_ms = 400, -- if the overlay never shows up (binary missing?), switch anyway after this
-	disable_workspace_animation = true,
+	disable_workspace_animation = true, -- the effect replaces Hyprland's own slide
 	bin = "hyprtransition", -- the binary; anything your shell can find
 }
 
@@ -73,64 +68,18 @@ local function read_config()
 	return cfg
 end
 
--- one level deep, so `keys = { mod = "SUPER" }` keeps the other key defaults
-local function merge(into, from)
-	for k, v in pairs(from) do
-		if type(v) == "table" and type(into[k]) == "table" then
-			for k2, v2 in pairs(v) do
-				into[k][k2] = v2
-			end
-		else
-			into[k] = v
-		end
-	end
-end
-
--- ---------------------------------------------------------------- backend
-
-local smw -- split-monitor-workspaces' Lua helpers, when the plugin is loaded
-do
-	local ok, p = pcall(function()
-		return hl.plugin.split_monitor_workspaces
-	end)
-	smw = ok and p or nil
-end
-
--- The plugin's helpers dispatch on their own and return a result table; the
--- core helpers return an HL.Dispatcher userdata that still needs dispatching.
-local function run(result)
-	if type(result) == "userdata" then
-		hl.dispatch(result)
-	end
-end
-
-local function goto_ws(i)
-	if smw then
-		run(smw.workspace(i))
-	else
-		run(hl.dsp.focus({ workspace = i }))
-	end
-end
-
-local function cycle(dir)
-	if smw then
-		run(smw.cycle_workspaces(dir))
-	else
-		run(hl.dsp.focus({ workspace = dir == "next" and "e+1" or "e-1" }))
-	end
-end
-
-local function target_id(mon, i)
-	if smw then
-		return mon.id * M.keys.workspaces + i
-	end
-	return i
-end
-
 -- ---------------------------------------------------------------- effect
 
-local pending = nil -- the switch waiting for the overlay to show up
+local last = {} -- monitor id -> workspace id we last saw active there
+local suppress = false -- our own switches must not re-trigger us
+local pending = nil -- the forward switch waiting for the overlay to show up
 local busy = false -- an effect is already on screen; don't stack another
+
+local function switch(id)
+	suppress = true
+	pcall(hl.dispatch, hl.dsp.focus({ workspace = id }))
+	suppress = false
+end
 
 local function pick_effect()
 	local e = M.effect
@@ -140,13 +89,7 @@ local function pick_effect()
 	return e
 end
 
-local function with_effect(action)
-	local mon = hl.get_active_monitor()
-	if not M.enabled or busy or not mon then
-		action()
-		return
-	end
-
+local function with_effect(mon, action)
 	pending = action
 	busy = true
 	local cmd = string.format("%s -e %s -o %s", M.bin, pick_effect(), mon.name)
@@ -170,40 +113,46 @@ local function with_effect(action)
 	end, { timeout = (M.duration or 700) + 100, type = "oneshot" })
 end
 
+local function on_workspace_active(ws)
+	if suppress then
+		return
+	end
+	local mon = ws.monitor
+	if not mon then
+		return
+	end
+	local prev = last[mon.id]
+	last[mon.id] = ws.id
+	-- first sighting of this monitor, no actual change, or a special workspace: nothing to do
+	if not prev or prev == ws.id or ws.special then
+		return
+	end
+	if not M.enabled or busy then
+		return
+	end
+
+	-- Nothing has been drawn yet: step back, cover the old screen, then go forward under the cover.
+	local target = ws.id
+	switch(prev)
+	with_effect(mon, function()
+		switch(target)
+	end)
+end
+
 -- ---------------------------------------------------------------- public
 
 M.enabled = true
 
---- Switch to workspace i (1-based, on the focused monitor) with the effect.
-function M.go(i)
-	local mon = hl.get_active_monitor()
-	-- already there: nothing to reveal, keep the original behaviour untouched
-	if mon and mon.active_workspace and mon.active_workspace.id == target_id(mon, i) then
-		goto_ws(i)
-		return
-	end
-	with_effect(function()
-		goto_ws(i)
-	end)
-end
-
---- Cycle to the "next" or "prev" workspace with the effect.
-function M.cycle(dir)
-	with_effect(function()
-		cycle(dir)
-	end)
-end
-
-local function rebind(key, fn)
-	hl.unbind(key)
-	hl.bind(key, fn)
-end
-
 function M.setup(opts)
-	M.keys = {}
-	merge(M, defaults)
-	merge(M, read_config())
-	merge(M, opts or {})
+	for k, v in pairs(defaults) do
+		M[k] = v
+	end
+	for k, v in pairs(read_config()) do
+		M[k] = v
+	end
+	for k, v in pairs(opts or {}) do
+		M[k] = v
+	end
 
 	hl.layer_rule({
 		name = "hyprtransition-noanim",
@@ -215,6 +164,14 @@ function M.setup(opts)
 		hl.animation({ leaf = "workspaces", enabled = false, speed = 1, bezier = "default" })
 	end
 
+	for _, mon in ipairs(hl.get_monitors()) do
+		if mon.active_workspace then
+			last[mon.id] = mon.active_workspace.id
+		end
+	end
+
+	hl.on("workspace.active", on_workspace_active)
+
 	hl.on("layer.opened", function(layer)
 		local got, ns = pcall(function()
 			return layer.namespace
@@ -225,20 +182,6 @@ function M.setup(opts)
 			action()
 		end
 	end)
-
-	if M.keys.bind then
-		for i = 1, M.keys.workspaces do
-			rebind(M.keys.mod .. " + " .. i, function()
-				M.go(i)
-			end)
-		end
-		rebind(M.keys.mod .. " + 0", function()
-			M.cycle("next")
-		end)
-		rebind(M.keys.mod .. " + 9", function()
-			M.cycle("prev")
-		end)
-	end
 
 	HyprTransition = M -- reachable from `hyprctl dispatch` Lua snippets
 	return M

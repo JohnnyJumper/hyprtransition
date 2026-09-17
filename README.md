@@ -5,9 +5,10 @@ When you switch workspaces, the old screen tears in half and falls away,
 burns up like paper, shatters into spinning tiles — or does whatever you
 write in a ~30-line GLSL file.
 
-Purely cosmetic and fully decoupled: it never touches workspaces itself, it
-works with or without plugins like split-monitor-workspaces, and turning it
-off is deleting one line.
+Purely cosmetic and fully decoupled: it knows nothing about your keys, your
+workspace layout or your plugins. It reacts to the workspace *changing* —
+however that happened: keys, scroll, waybar, `hyprctl`, split-monitor-workspaces,
+anything — and turning it off is deleting one line.
 
 ## How it works
 
@@ -19,9 +20,12 @@ off is deleting one line.
    background. Wherever the effect outputs alpha 0, the new workspace shows through
 4. exits
 
-The Lua module dispatches the real workspace switch at the exact moment
-Hyprland reports the overlay as opened, so the switch is hidden under a
-pixel-exact copy of the old screen until the effect reveals it. No flash, no
+The Lua module hooks Hyprland's `workspace.active` event, which fires
+synchronously inside the switch before anything is drawn. Right there it steps
+back to the old workspace (invisible — no frame has been rendered), starts the
+overlay, and the moment Hyprland reports the overlay as opened it switches
+forward underneath it. The switch is hidden under a pixel-exact copy of the
+old screen until the effect reveals it. No flash, no key configuration, no
 compositor patching, nothing that breaks on Hyprland updates.
 
 ## Requirements
@@ -43,8 +47,7 @@ sudo make install        # system-wide, PREFIX=/usr/local by default
 make install-user        # ~/.local/bin + ~/.local/share/hyprtransition/ — nothing touches ~/.config
 ```
 
-Then add **one line** at the end of your `hyprland.lua` (after your keybinds —
-it takes over the workspace keys):
+Then add **one line** anywhere in your `hyprland.lua`:
 
 ```lua
 -- system install: the module is on Hyprland's Lua path
@@ -55,7 +58,7 @@ require("hyprtransition").setup()
 dofile(os.getenv("HOME") .. "/.local/share/hyprtransition/hyprtransition.lua").setup()
 ```
 
-Reload, press `mod + 2`. Delete the line to turn it off.
+Reload, switch workspaces however you normally do. Delete the line to turn it off.
 
 ## Configuration
 
@@ -77,11 +80,7 @@ return {
     duration = nil,                  -- ms; nil = each effect file's own "// duration:" line
     cursor = false,                  -- include the mouse cursor in the captured screen
 
-    keys = {                         -- Lua module only
-        mod = "ALT",                 -- binds mod+1..workspaces, mod+0 = next, mod+9 = prev
-        workspaces = 5,
-        bind = true,                 -- false: keep your binds, call HyprTransition.go(i) yourself
-    },
+    -- Lua module only
     fallback_ms = 400,               -- if the overlay never appears, switch anyway after this
     disable_workspace_animation = true,  -- the effect replaces Hyprland's slide
     bin = "hyprtransition",          -- if it isn't on your PATH
@@ -181,7 +180,12 @@ hyprtransition [-e EFFECT] [-o OUTPUT] [-d MS] [-s SEED] [-c] [--loop] [--then C
   after that; the switch itself is never delayed by more than the overlay setup.
 - Fractional scaling and rotated monitors are handled (the overlay renders at
   the physical resolution and is pixel-exact).
-- With split-monitor-workspaces, `workspaces` must match the plugin's `count`.
+- Every workspace change on a monitor plays the effect, including ones you
+  didn't type (e.g. focusing an urgent window on another workspace). Special
+  workspaces and moving the mouse between monitors do not.
+- Workspace-swipe gestures: the swipe already animated the change visually, so
+  the effect will replay it. Set `HyprTransition.enabled = false` around
+  gesture use if that bothers you.
 
 ## Why isn't this a hyprpm plugin?
 

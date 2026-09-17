@@ -13,13 +13,6 @@ return {
 	-- Include the mouse cursor in the captured screen.
 	cursor = false,
 
-	-- Key bindings (Lua module only).
-	keys = {
-		mod = "ALT", -- binds mod+1..workspaces, mod+0 = next, mod+9 = prev
-		workspaces = 5, -- must match split_monitor_workspaces.count if you use that plugin
-		bind = true, -- false: keep your own binds, call HyprTransition.go(i) / cycle("next") yourself
-	},
-
 	-- If the overlay never appears (binary missing?), switch anyway after this many ms.
 	fallback_ms = 400,
 
