@@ -46,6 +46,7 @@ install: build/hyprtransition
 	install -Dm755 build/hyprtransition $(DESTDIR)$(BINDIR)/hyprtransition
 	install -Dm644 lua/hyprtransition.lua $(DESTDIR)$(LUADIR)/hyprtransition.lua
 	install -Dm644 -t $(DESTDIR)$(DATADIR)/effects effects/*.glsl
+	install -Dm644 config.example $(DESTDIR)$(DATADIR)/config.example
 
 uninstall:
 	rm -f $(DESTDIR)$(BINDIR)/hyprtransition $(DESTDIR)$(LUADIR)/hyprtransition.lua
@@ -58,9 +59,12 @@ install-user: build/hyprtransition
 	install -Dm755 build/hyprtransition $(HOME)/.local/bin/hyprtransition
 	install -Dm644 lua/hyprtransition.lua $(USER_DATA)/hyprtransition.lua
 	install -Dm644 -t $(USER_DATA)/effects effects/*.glsl
+	install -Dm644 config.example $(USER_DATA)/config.example
 	@echo
 	@echo "Installed. Add to the end of your hyprland.lua:"
-	@echo '  dofile(os.getenv("HOME") .. "/.local/share/hyprtransition/hyprtransition.lua").setup({ mod = "ALT" })'
+	@echo '  dofile(os.getenv("HOME") .. "/.local/share/hyprtransition/hyprtransition.lua").setup()'
+	@echo "Settings (optional):"
+	@echo '  mkdir -p ~/.config/hyprtransition && cp $(USER_DATA)/config.example ~/.config/hyprtransition/config'
 
 uninstall-user:
 	rm -f $(HOME)/.local/bin/hyprtransition

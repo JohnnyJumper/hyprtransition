@@ -2,14 +2,13 @@
 --
 -- Usage (last line of your hyprland.lua, after your keybinds):
 --
---     require("hyprtransition").setup({           -- system install (module is on the Lua path)
---         mod = "ALT",                            -- modifier of your workspace keys
---         effect = "tear",                        -- or { "tear", "burn", "tiles" } to pick at random
---     })
+--     require("hyprtransition").setup()           -- system install (module is on the Lua path)
 --
 --     -- user install (nothing is placed in ~/.config/hypr, so load it by path):
---     dofile(os.getenv("HOME") .. "/.local/share/hyprtransition/hyprtransition.lua").setup({ mod = "ALT" })
+--     dofile(os.getenv("HOME") .. "/.local/share/hyprtransition/hyprtransition.lua").setup()
 --
+-- Settings come from ~/.config/hyprtransition/config (see config.example);
+-- anything passed to setup({ ... }) overrides the file, e.g. setup({ effect = "burn" }).
 -- Remove that line to turn it off. All options and their defaults are in
 -- `defaults` below. The module takes over `mod + 1..workspaces` and
 -- `mod + 0` / `mod + 9` (next/prev), hides the overlay from your layer
@@ -39,6 +38,52 @@ local defaults = {
 	fallback_ms = 400, -- if the overlay never shows up (binary missing?), switch anyway after this
 	disable_workspace_animation = true,
 }
+
+-- ---------------------------------------------------------------- config file
+
+local function config_dir()
+	local xdg = os.getenv("XDG_CONFIG_HOME")
+	if xdg then
+		return xdg .. "/hyprtransition"
+	end
+	return (os.getenv("HOME") or "~") .. "/.config/hyprtransition"
+end
+
+local function parse_value(key, v)
+	if key == "effect" and v:find(",") then
+		local list = {}
+		for item in v:gmatch("[^,]+") do
+			list[#list + 1] = item:match("^%s*(.-)%s*$")
+		end
+		return list
+	end
+	if v == "true" then
+		return true
+	elseif v == "false" then
+		return false
+	end
+	return tonumber(v) or v
+end
+
+-- `key = value` lines; unknown keys are kept too, so effects can grow their own later
+local function read_config()
+	local cfg = {}
+	local f = io.open(config_dir() .. "/config", "r")
+	if not f then
+		return cfg
+	end
+	for raw in f:lines() do
+		local line = raw:match("^%s*(.-)%s*$")
+		if line ~= "" and line:sub(1, 1) ~= "#" then
+			local k, v = line:match("^([%w_]+)%s*=%s*(.-)$")
+			if k then
+				cfg[k] = parse_value(k, v)
+			end
+		end
+	end
+	f:close()
+	return cfg
+end
 
 -- ---------------------------------------------------------------- backend
 
@@ -152,6 +197,9 @@ end
 
 function M.setup(opts)
 	for k, v in pairs(defaults) do
+		M[k] = v
+	end
+	for k, v in pairs(read_config()) do
 		M[k] = v
 	end
 	for k, v in pairs(opts or {}) do

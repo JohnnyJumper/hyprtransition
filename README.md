@@ -48,31 +48,46 @@ it takes over the workspace keys):
 
 ```lua
 -- system install: the module is on Hyprland's Lua path
-require("hyprtransition").setup({ mod = "ALT", effect = "tear" })
+require("hyprtransition").setup()
 
 -- user install: Hyprland only searches ~/.config/hypr and system dirs for modules,
--- and we don't put files in your config, so load it by path instead
-dofile(os.getenv("HOME") .. "/.local/share/hyprtransition/hyprtransition.lua").setup({ mod = "ALT", effect = "tear" })
+-- and we don't put files in your Hyprland config, so load it by path instead
+dofile(os.getenv("HOME") .. "/.local/share/hyprtransition/hyprtransition.lua").setup()
 ```
 
-Reload, press `mod + 2`. Delete the line to turn it off. hyprtransition never
-creates or modifies anything in your config directory; the only thing it reads
-there is `~/.config/hyprtransition/effects/`, if you make it.
+Reload, press `mod + 2`. Delete the line to turn it off.
 
-All options and their defaults:
+## Configuration
 
-```lua
-require("hyprtransition").setup({
-    mod = "ALT",
-    effect = "tear",                 -- name in an effects dir, or a list to pick from at random
-    duration = nil,                  -- ms; nil = the effect file's own "// duration:" line
-    workspaces = 5,                  -- binds mod+1..workspaces (and mod+0 / mod+9 = next / prev)
-    bin = "hyprtransition",          -- the binary; anything your shell can find
-    bind_keys = true,                -- false: keep your binds, call HyprTransition.go(i) yourself
-    fallback_ms = 400,               -- if the overlay never appears, switch anyway after this
-    disable_workspace_animation = true,  -- the effect replaces Hyprland's slide
-})
+Everything of yours lives in `~/.config/hyprtransition/` (or `$XDG_CONFIG_HOME`).
+hyprtransition only reads it, never creates it:
+
 ```
+~/.config/hyprtransition/
+├── config        your settings, key = value  (optional; every key has a default)
+└── effects/      your own effects; a file with a bundled effect's name overrides it
+```
+
+Start from the example: `mkdir -p ~/.config/hyprtransition && cp ~/.local/share/hyprtransition/config.example ~/.config/hyprtransition/config`
+(`/usr/share/hyprtransition/config.example` for a system install).
+
+```ini
+effect = tear                # or a list: tear, burn, tiles  → one at random per switch
+# duration = 700             # ms; unset = the effect file's own "// duration:" line
+cursor = false               # include the mouse cursor in the captured screen
+
+# Lua module only
+mod = ALT                    # binds mod+1..workspaces, mod+0 = next, mod+9 = prev
+workspaces = 5
+bind_keys = true             # false: keep your binds, call HyprTransition.go(i) yourself
+fallback_ms = 400            # if the overlay never appears, switch anyway after this
+disable_workspace_animation = true   # the effect replaces Hyprland's slide
+# bin = /path/to/hyprtransition      # if it isn't on your PATH
+```
+
+The binary reads `effect`, `duration` and `cursor` (so `hyprland.conf` users get
+them too); the Lua module reads all of them. Precedence: built-in defaults <
+config file < `setup({ ... })` arguments / command-line flags.
 
 Change things at runtime, from a bind or a terminal:
 
@@ -124,8 +139,8 @@ vec4 effect(vec2 uv, float t) {
 ```
 
 That is a complete effect (a fade). Drop it in `~/.config/hyprtransition/effects/`
-(create it — we never do) and it's usable as `effect = "<name>"`. A file there
-with the same name as a bundled effect overrides it. Start from [`effects/_template.glsl`](effects/_template.glsl),
+and it's usable as `effect = <name>`. A file there with the same name as a
+bundled effect overrides it. Start from [`effects/_template.glsl`](effects/_template.glsl),
 which lists every uniform and helper available (noise, easing, `rotate_about`,
 `screen(uv)`, …) and the one trick for moving pieces around: undo the motion and
 move the *lookup*, not the pixels.
@@ -140,7 +155,7 @@ Save, and the next cycle uses it. Compile errors are printed with your file's
 line numbers, and the last good version keeps playing.
 
 Effects are searched, in order, in `$HYPRTRANSITION_EFFECTS`,
-`$XDG_CONFIG_HOME/hyprtransition/effects` (yours), `$XDG_DATA_HOME/hyprtransition/effects`
+`~/.config/hyprtransition/effects` (yours), `~/.local/share/hyprtransition/effects`
 (user install), next to the binary (a checkout), then `/usr/share/hyprtransition/effects`
 (system install). `-e` also takes a path.
 

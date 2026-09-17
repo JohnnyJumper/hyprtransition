@@ -13,6 +13,9 @@
 //
 //   hyprtransition [-e EFFECT] [-o OUTPUT] [-d MS] [-s SEED] [-c] [--loop] [--then CMD]
 //
+//   Defaults for -e, -d and -c can be set in $XDG_CONFIG_HOME/hyprtransition/config
+//   (see config.example); flags override the file.
+//
 //   -e EFFECT   effect name or a path to a .glsl file. Default: tear. Names are
 //               looked up, in order, in $HYPRTRANSITION_EFFECTS,
 //               $XDG_CONFIG_HOME/hyprtransition/effects (your own effects),
@@ -174,6 +177,56 @@ static void layer_closed(void *d, struct zwlr_layer_surface_v1 *ls) {
 }
 static const struct zwlr_layer_surface_v1_listener layer_listener = { layer_configure, layer_closed };
 
+// ---------------------------------------------------------------- config file
+
+static void config_dir(char *out, size_t n) {
+    const char *xdg = getenv("XDG_CONFIG_HOME"), *home = getenv("HOME");
+    if (xdg) snprintf(out, n, "%s/hyprtransition", xdg);
+    else if (home) snprintf(out, n, "%s/.config/hyprtransition", home);
+    else out[0] = 0;
+}
+
+static char *trim(char *s) {
+    while (*s == ' ' || *s == '\t') s++;
+    char *e = s + strlen(s);
+    while (e > s && (e[-1] == ' ' || e[-1] == '\t' || e[-1] == '\n' || e[-1] == '\r')) *--e = 0;
+    return s;
+}
+
+// "a, b, c" -> one of them at random (the Lua module does the same when it drives us)
+static const char *pick_from_list(const char *list) {
+    int n = 1;
+    for (const char *p = list; *p; p++) n += *p == ',';
+    int want = rand() % n;
+    char *copy = strdup(list), *tok = strtok(copy, ",");
+    for (int i = 0; tok && i < want; i++) tok = strtok(NULL, ",");
+    return tok ? strdup(trim(tok)) : list;
+}
+
+// Reads `key = value` lines; only fills in what the command line did not set.
+static void load_config(struct state *st) {
+    char dir[1024], path[1100];
+    config_dir(dir, sizeof dir);
+    if (!dir[0]) return;
+    snprintf(path, sizeof path, "%s/config", dir);
+    FILE *f = fopen(path, "r");
+    if (!f) return;
+    char line[512];
+    while (fgets(line, sizeof line, f)) {
+        char *k = trim(line);
+        if (*k == '#' || !*k) continue;
+        char *eq = strchr(k, '=');
+        if (!eq) continue;
+        *eq = 0;
+        k = trim(k);
+        char *v = trim(eq + 1);
+        if (!strcmp(k, "effect") && !st->effect) st->effect = pick_from_list(v);
+        else if (!strcmp(k, "duration") && st->duration_ms <= 0) st->duration_ms = atof(v);
+        else if (!strcmp(k, "cursor") && !st->cursor) st->cursor = !strcmp(v, "true") || !strcmp(v, "1");
+    }
+    fclose(f);
+}
+
 // ---------------------------------------------------------------- effect files
 
 static const char *VS =
@@ -244,13 +297,12 @@ static void resolve_effect(struct state *st) {
         snprintf(st->effect_path, sizeof st->effect_path, "%s", st->effect);
         return;
     }
-    char exe[4096], dirs[7][1024];
+    char exe[4096], dirs[7][1024], cfg[1024];
     int n_dirs = 0;
-    const char *env = getenv("HYPRTRANSITION_EFFECTS"), *home = getenv("HOME");
-    const char *xdg_config = getenv("XDG_CONFIG_HOME"), *xdg_data = getenv("XDG_DATA_HOME");
+    const char *env = getenv("HYPRTRANSITION_EFFECTS"), *home = getenv("HOME"), *xdg_data = getenv("XDG_DATA_HOME");
     if (env) snprintf(dirs[n_dirs++], 1024, "%s", env);
-    if (xdg_config) snprintf(dirs[n_dirs++], 1024, "%s/hyprtransition/effects", xdg_config);
-    else if (home) snprintf(dirs[n_dirs++], 1024, "%s/.config/hyprtransition/effects", home);
+    config_dir(cfg, sizeof cfg);
+    if (cfg[0]) snprintf(dirs[n_dirs++], 1024, "%.1000s/effects", cfg);
     if (xdg_data) snprintf(dirs[n_dirs++], 1024, "%s/hyprtransition/effects", xdg_data);
     else if (home) snprintf(dirs[n_dirs++], 1024, "%s/.local/share/hyprtransition/effects", home);
     ssize_t n = readlink("/proc/self/exe", exe, sizeof exe - 1);
@@ -486,7 +538,7 @@ static void usage(void) {
 }
 
 int main(int argc, char **argv) {
-    struct state st = { .seed = -1, .effect = DEFAULT_EFFECT };
+    struct state st = { .seed = -1 };
     t_start = now_ms();
     debug = getenv("HYPRTRANSITION_DEBUG") != NULL;
     for (int i = 1; i < argc; i++) {
@@ -499,10 +551,10 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--then") && i + 1 < argc) st.then = argv[++i];
         else usage();
     }
-    if (st.seed < 0) {
-        srand((unsigned)(now_ms() * 1000) ^ (unsigned)getpid());
-        st.seed = (float)(rand() % 1000);
-    }
+    srand((unsigned)(now_ms() * 1000) ^ (unsigned)getpid());
+    if (st.seed < 0) st.seed = (float)(rand() % 1000);
+    load_config(&st);
+    if (!st.effect) st.effect = DEFAULT_EFFECT;
     resolve_effect(&st);
     char focused[64];
     if (!st.out_name && focused_output(focused, sizeof focused)) st.out_name = focused;
