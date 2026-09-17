@@ -14,8 +14,11 @@
 //   hyprtransition [-e EFFECT] [-o OUTPUT] [-d MS] [-s SEED] [-c] [--loop] [--then CMD]
 //
 //   -e EFFECT   effect name or a path to a .glsl file. Default: tear. Names are
-//               looked up in $HYPRTRANSITION_EFFECTS, ~/.config/hypr/hyprtransition/effects,
-//               <dir of binary>/effects, <dir of binary>/../effects, DATADIR/effects
+//               looked up, in order, in $HYPRTRANSITION_EFFECTS,
+//               $XDG_CONFIG_HOME/hyprtransition/effects (your own effects),
+//               $XDG_DATA_HOME/hyprtransition/effects (user install),
+//               <dir of binary>/effects and ../effects (running from a checkout),
+//               DATADIR/effects (system install)
 //   -o OUTPUT   output name (e.g. DP-3). Default: the focused monitor (via hyprctl)
 //   -d MS       total duration in ms. Default: the effect's "// duration:" line, else 700
 //   -s SEED     randomness seed (default: random)
@@ -233,19 +236,23 @@ static char *read_file(const char *path) {
     return buf;
 }
 
-// "-e some/path.glsl" is used as is; "-e NAME" is searched for as NAME.glsl in:
-// $HYPRTRANSITION_EFFECTS, ~/.config/hypr/hyprtransition/effects, next to the
-// binary (effects/ and ../effects/, for running from a checkout), then DATADIR.
+// "-e some/path.glsl" is used as is; "-e NAME" is searched for as NAME.glsl in
+// the directories listed at the top of this file. Earlier entries shadow later
+// ones, so a user's own tear.glsl overrides the bundled one.
 static void resolve_effect(struct state *st) {
     if (strchr(st->effect, '/')) {
         snprintf(st->effect_path, sizeof st->effect_path, "%s", st->effect);
         return;
     }
-    char exe[4096], dirs[6][1024];
+    char exe[4096], dirs[7][1024];
     int n_dirs = 0;
     const char *env = getenv("HYPRTRANSITION_EFFECTS"), *home = getenv("HOME");
+    const char *xdg_config = getenv("XDG_CONFIG_HOME"), *xdg_data = getenv("XDG_DATA_HOME");
     if (env) snprintf(dirs[n_dirs++], 1024, "%s", env);
-    if (home) snprintf(dirs[n_dirs++], 1024, "%s/.config/hypr/hyprtransition/effects", home);
+    if (xdg_config) snprintf(dirs[n_dirs++], 1024, "%s/hyprtransition/effects", xdg_config);
+    else if (home) snprintf(dirs[n_dirs++], 1024, "%s/.config/hyprtransition/effects", home);
+    if (xdg_data) snprintf(dirs[n_dirs++], 1024, "%s/hyprtransition/effects", xdg_data);
+    else if (home) snprintf(dirs[n_dirs++], 1024, "%s/.local/share/hyprtransition/effects", home);
     ssize_t n = readlink("/proc/self/exe", exe, sizeof exe - 1);
     if (n >= 0) {
         exe[n] = 0;

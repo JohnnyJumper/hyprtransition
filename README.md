@@ -37,23 +37,27 @@ compositor patching, nothing that breaks on Hyprland updates.
 ```sh
 git clone https://github.com/jeyhunt/hyprtransition
 cd hyprtransition
-make install-user        # ~/.local/bin/hyprtransition + ~/.config/hypr/hyprtransition/
-# or, system-wide:
-sudo make install        # PREFIX=/usr/local by default
+sudo make install        # system-wide, PREFIX=/usr/local by default
 # Arch: makepkg -si      # uses the included PKGBUILD
+# or, without root:
+make install-user        # ~/.local/bin + ~/.local/share/hyprtransition/ — nothing touches ~/.config
 ```
 
-Then add this as the **last** line of `~/.config/hypr/hyprland.lua` (after
-your keybinds — it takes over the workspace keys):
+Then add **one line** at the end of your `hyprland.lua` (after your keybinds —
+it takes over the workspace keys):
 
 ```lua
-require("hyprtransition").setup({
-    mod = "ALT",                          -- the modifier of your workspace keys
-    effect = "tear",                      -- or { "tear", "burn", "tiles" } for random
-})
+-- system install: the module is on Hyprland's Lua path
+require("hyprtransition").setup({ mod = "ALT", effect = "tear" })
+
+-- user install: Hyprland only searches ~/.config/hypr and system dirs for modules,
+-- and we don't put files in your config, so load it by path instead
+dofile(os.getenv("HOME") .. "/.local/share/hyprtransition/hyprtransition.lua").setup({ mod = "ALT", effect = "tear" })
 ```
 
-Reload, press `mod + 2`. Delete the line to turn it off.
+Reload, press `mod + 2`. Delete the line to turn it off. hyprtransition never
+creates or modifies anything in your config directory; the only thing it reads
+there is `~/.config/hyprtransition/effects/`, if you make it.
 
 All options and their defaults:
 
@@ -119,8 +123,9 @@ vec4 effect(vec2 uv, float t) {
 }
 ```
 
-That is a complete effect (a fade). Drop it in `~/.config/hypr/hyprtransition/effects/`
-and it's usable as `effect = "<name>"`. Start from [`effects/_template.glsl`](effects/_template.glsl),
+That is a complete effect (a fade). Drop it in `~/.config/hyprtransition/effects/`
+(create it — we never do) and it's usable as `effect = "<name>"`. A file there
+with the same name as a bundled effect overrides it. Start from [`effects/_template.glsl`](effects/_template.glsl),
 which lists every uniform and helper available (noise, easing, `rotate_about`,
 `screen(uv)`, …) and the one trick for moving pieces around: undo the motion and
 move the *lookup*, not the pixels.
@@ -134,8 +139,10 @@ hyprtransition -e <name> --loop    # replays forever, re-reads the file every cy
 Save, and the next cycle uses it. Compile errors are printed with your file's
 line numbers, and the last good version keeps playing.
 
-Effects are searched in `$HYPRTRANSITION_EFFECTS`, `~/.config/hypr/hyprtransition/effects`,
-next to the binary, then `/usr/share/hyprtransition/effects`. `-e` also takes a path.
+Effects are searched, in order, in `$HYPRTRANSITION_EFFECTS`,
+`$XDG_CONFIG_HOME/hyprtransition/effects` (yours), `$XDG_DATA_HOME/hyprtransition/effects`
+(user install), next to the binary (a checkout), then `/usr/share/hyprtransition/effects`
+(system install). `-e` also takes a path.
 
 ## CLI
 

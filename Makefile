@@ -2,7 +2,7 @@
 #
 #   make                 build ./build/hyprtransition (effects are found in ./effects)
 #   make install         system-wide into PREFIX (default /usr/local)
-#   make install-user    for you only: ~/.local/bin + ~/.config/hypr/hyprtransition/
+#   make install-user    for you only: ~/.local/bin + ~/.local/share/hyprtransition/ (nothing in ~/.config)
 #   make uninstall / uninstall-user
 
 PREFIX  ?= /usr/local
@@ -51,16 +51,20 @@ uninstall:
 	rm -f $(DESTDIR)$(BINDIR)/hyprtransition $(DESTDIR)$(LUADIR)/hyprtransition.lua
 	rm -rf $(DESTDIR)$(DATADIR)
 
-USER_CFG = $(HOME)/.config/hypr/hyprtransition
+XDG_DATA_HOME ?= $(HOME)/.local/share
+USER_DATA      = $(XDG_DATA_HOME)/hyprtransition
 
 install-user: build/hyprtransition
 	install -Dm755 build/hyprtransition $(HOME)/.local/bin/hyprtransition
-	install -Dm644 lua/hyprtransition.lua $(USER_CFG)/init.lua
-	install -Dm644 -t $(USER_CFG)/effects effects/*.glsl
+	install -Dm644 lua/hyprtransition.lua $(USER_DATA)/hyprtransition.lua
+	install -Dm644 -t $(USER_DATA)/effects effects/*.glsl
+	@echo
+	@echo "Installed. Add to the end of your hyprland.lua:"
+	@echo '  dofile(os.getenv("HOME") .. "/.local/share/hyprtransition/hyprtransition.lua").setup({ mod = "ALT" })'
 
 uninstall-user:
 	rm -f $(HOME)/.local/bin/hyprtransition
-	rm -rf $(USER_CFG)
+	rm -rf $(USER_DATA)
 
 clean:
 	rm -rf build

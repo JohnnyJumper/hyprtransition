@@ -2,10 +2,13 @@
 --
 -- Usage (last line of your hyprland.lua, after your keybinds):
 --
---     require("hyprtransition").setup({
---         mod = "ALT",                        -- modifier of your workspace keys
---         effect = "tear",                    -- or { "tear", "burn", "tiles" } to pick at random
+--     require("hyprtransition").setup({           -- system install (module is on the Lua path)
+--         mod = "ALT",                            -- modifier of your workspace keys
+--         effect = "tear",                        -- or { "tear", "burn", "tiles" } to pick at random
 --     })
+--
+--     -- user install (nothing is placed in ~/.config/hypr, so load it by path):
+--     dofile(os.getenv("HOME") .. "/.local/share/hyprtransition/hyprtransition.lua").setup({ mod = "ALT" })
 --
 -- Remove that line to turn it off. All options and their defaults are in
 -- `defaults` below. The module takes over `mod + 1..workspaces` and
