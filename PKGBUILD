@@ -1,10 +1,10 @@
-# Maintainer: Johnny <jeyhunt@gmail.com>
+# Maintainer: JohnnyJumper <jeyhunt@gmail.com>
 pkgname=hyprtransition-git
 pkgver=r1
 pkgrel=1
 pkgdesc="Shader-driven workspace transitions for Hyprland (tear, burn, tiles, or your own GLSL)"
 arch=('x86_64' 'aarch64')
-url="https://github.com/jeyhunt/hyprtransition"
+url="https://github.com/JohnnyJumper/hyprtransition"
 license=('MIT')
 depends=('wayland' 'libglvnd' 'grim' 'lua' 'hyprland')
 makedepends=('git' 'wayland-protocols' 'pkgconf')

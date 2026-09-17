@@ -5,6 +5,7 @@
 #   make install-user    for you only: ~/.local/bin + ~/.local/share/hyprtransition/ (nothing in ~/.config)
 #   make uninstall / uninstall-user
 
+VERSION  = 0.0.1
 PREFIX  ?= /usr/local
 BINDIR  ?= $(PREFIX)/bin
 DATADIR ?= $(PREFIX)/share/hyprtransition
@@ -13,7 +14,7 @@ DESTDIR ?=
 
 CC      ?= cc
 CFLAGS  ?= -O2
-CFLAGS  += -Wall -Wextra -DDATADIR='"$(DATADIR)"'
+override CFLAGS += -Wall -Wextra -DDATADIR='"$(DATADIR)"' -DVERSION='"$(VERSION)"'
 # whichever Lua pkg-config name this distro uses (Hyprland embeds 5.5; 5.4 works too)
 LUA_PKG ?= $(shell for p in lua5.5 lua-5.5 lua lua5.4 lua-5.4; do pkg-config --exists $$p && echo $$p && break; done)
 PKGS     = wayland-client wayland-egl egl glesv2 $(LUA_PKG)
@@ -29,8 +30,14 @@ HDR      = $(patsubst %.xml,build/gen/%-client-protocol.h,$(notdir $(XMLS)))
 
 all: build/hyprtransition
 
-build/hyprtransition: src/hyprtransition.c $(GEN) $(HDR)
+build/hyprtransition: src/hyprtransition.c $(GEN) $(HDR) build/gen/shaders.h
 	$(CC) $(CFLAGS) -Ibuild/gen -o $@ src/hyprtransition.c $(GEN) $(LDLIBS)
+
+SHADERS = src/vertex.glsl src/prelude.glsl src/postlude.glsl
+build/gen/shaders.h: $(SHADERS) scripts/embed-glsl.sh | build/gen
+	{ ./scripts/embed-glsl.sh VERTEX_SHADER src/vertex.glsl; \
+	  ./scripts/embed-glsl.sh EFFECT_PRELUDE src/prelude.glsl; \
+	  ./scripts/embed-glsl.sh EFFECT_POSTLUDE src/postlude.glsl; } > $@
 
 # one rule per XML so make can find each by basename
 define gen_rule
@@ -72,7 +79,11 @@ uninstall-user:
 	rm -f $(HOME)/.local/bin/hyprtransition
 	rm -rf $(USER_DATA)
 
+check: build/hyprtransition
+	./scripts/check-effects.sh
+	for f in lua/*.lua config.example.lua; do luac -p $$f && echo "ok    $$f"; done
+
 clean:
 	rm -rf build
 
-.PHONY: all install uninstall install-user uninstall-user clean
+.PHONY: all check install uninstall install-user uninstall-user clean

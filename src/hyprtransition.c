@@ -32,6 +32,9 @@
 #ifndef DATADIR
 #define DATADIR "/usr/share/hyprtransition"
 #endif
+#ifndef VERSION
+#define VERSION "dev"
+#endif
 
 #define LAYER_NAMESPACE "hyprtransition"
 #define DEFAULT_EFFECT "tear"
@@ -182,6 +185,7 @@ static _Noreturn void usage(int status) {
           "  -c, --cursor          include the mouse cursor in the screenshot\n"
           "      --loop            replay forever, re-reading the effect file each cycle\n"
           "      --then CMD        run CMD once the overlay is on screen\n"
+          "  -v, --version\n"
           "\n"
           "Defaults for -e, -d and -c come from $XDG_CONFIG_HOME/hyprtransition/config.lua.\n",
           status ? stderr : stdout);
@@ -194,11 +198,11 @@ static void parse_args(int argc, char **argv) {
         { "duration", required_argument, NULL, 'd' }, { "seed", required_argument, NULL, 's' },
         { "cursor", no_argument, NULL, 'c' },         { "loop", no_argument, NULL, 'L' },
         { "then", required_argument, NULL, 'T' },     { "help", no_argument, NULL, 'h' },
-        { 0 },
+        { "version", no_argument, NULL, 'v' },        { 0 },
     };
     struct options *opt = &app.opt;
     int c;
-    while ((c = getopt_long(argc, argv, "e:o:d:s:ch", long_options, NULL)) != -1) {
+    while ((c = getopt_long(argc, argv, "e:o:d:s:chv", long_options, NULL)) != -1) {
         switch (c) {
         case 'e': opt->effect = optarg; break;
         case 'o': opt->output = optarg; break;
@@ -208,6 +212,7 @@ static void parse_args(int argc, char **argv) {
         case 'L': opt->loop = true; break;
         case 'T': opt->then = optarg; break;
         case 'h': usage(0);
+        case 'v': puts("hyprtransition " VERSION); exit(0);
         default: usage(2);
         }
     }
@@ -426,51 +431,7 @@ static void create_overlay(void) {
 
 // ---------------------------------------------------------------- shaders
 
-static const char *VERTEX_SHADER =
-    "attribute vec2 a_pos;\n"
-    "varying vec2 v_uv;\n"
-    "void main() {\n"
-    "  v_uv = vec2(a_pos.x * 0.5 + 0.5, 0.5 - a_pos.y * 0.5);\n"
-    "  gl_Position = vec4(a_pos, 0.0, 1.0);\n"
-    "}\n";
-
-// Everything an effect file may use. Documented in effects/_template.glsl.
-static const char *EFFECT_PRELUDE =
-    "precision highp float;\n"
-    "varying vec2 v_uv;\n"
-    "uniform sampler2D u_tex;\n"
-    "uniform float u_time;\n"
-    "uniform float u_seed;\n"
-    "uniform float u_aspect;\n"
-    "uniform vec2 u_resolution;\n"
-    "float hash(float n) { return fract(sin(n * 127.1 + u_seed * 311.7) * 43758.5453); }\n"
-    "float hash2(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7)) + u_seed * 74.7) * 43758.5453); }\n"
-    "float vnoise(float x) { float i = floor(x); return mix(hash(i), hash(i + 1.0), fract(x)); }\n"
-    "float vnoise2(vec2 p) {\n"
-    "  vec2 i = floor(p), f = fract(p);\n"
-    "  f = f * f * (3.0 - 2.0 * f);\n"
-    "  return mix(mix(hash2(i), hash2(i + vec2(1, 0)), f.x), mix(hash2(i + vec2(0, 1)), hash2(i + vec2(1, 1)), f.x), f.y);\n"
-    "}\n"
-    "float fbm(vec2 p) { return vnoise2(p) * 0.5 + vnoise2(p * 2.03) * 0.25 + vnoise2(p * 4.11) * 0.125 + vnoise2(p * 8.3) * 0.0625; }\n"
-    "float ease_in(float x) { return x * x; }\n"
-    "float ease_out(float x) { return 1.0 - (1.0 - x) * (1.0 - x); }\n"
-    "float ease_in_out(float x) { return x < 0.5 ? 2.0 * x * x : 1.0 - pow(-2.0 * x + 2.0, 2.0) / 2.0; }\n"
-    "float phase(float from, float to, float t) { return clamp((t - from) / (to - from), 0.0, 1.0); }\n"
-    "bool inside(vec2 uv) { return uv.x >= 0.0 && uv.x <= 1.0 && uv.y >= 0.0 && uv.y <= 1.0; }\n"
-    "vec4 screen(vec2 uv) { return inside(uv) ? vec4(texture2D(u_tex, uv).rgb, 1.0) : vec4(0.0); }\n"
-    "vec2 rotate_about(vec2 uv, vec2 pivot, float angle) {\n"
-    "  vec2 p = (uv - pivot) * vec2(u_aspect, 1.0);\n"
-    "  float c = cos(angle), s = sin(angle);\n"
-    "  p = vec2(c * p.x - s * p.y, s * p.x + c * p.y);\n"
-    "  return p / vec2(u_aspect, 1.0) + pivot;\n"
-    "}\n"
-    "#line 1\n";
-
-static const char *EFFECT_POSTLUDE =
-    "\nvoid main() {\n"
-    "  vec4 c = effect(v_uv, u_time);\n"
-    "  gl_FragColor = vec4(c.rgb * c.a, c.a);\n"
-    "}\n";
+#include "shaders.h" // VERTEX_SHADER, EFFECT_PRELUDE, EFFECT_POSTLUDE from src/*.glsl
 
 static GLuint compile_shader(GLenum type, const char *source, const char *label) {
     GLuint shader = glCreateShader(type);

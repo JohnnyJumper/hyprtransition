@@ -1,5 +1,7 @@
 # hyprtransition
 
+[![CI](https://github.com/JohnnyJumper/hyprtransition/actions/workflows/ci.yml/badge.svg)](https://github.com/JohnnyJumper/hyprtransition/actions/workflows/ci.yml)
+
 Shader-driven workspace transitions for [Hyprland](https://hyprland.org).
 When you switch workspaces, the old screen tears in half and falls away,
 burns up like paper, gets sucked into a black hole, turns like a book page,
@@ -39,7 +41,7 @@ compositor patching, nothing that breaks on Hyprland updates.
 ## Install
 
 ```sh
-git clone https://github.com/jeyhunt/hyprtransition
+git clone https://github.com/JohnnyJumper/hyprtransition
 cd hyprtransition
 sudo make install        # system-wide, PREFIX=/usr/local by default
 # Arch: makepkg -si      # uses the included PKGBUILD
@@ -155,7 +157,9 @@ hyprtransition -e <name> --loop    # replays forever, re-reads the file every cy
 ```
 
 Save, and the next cycle uses it. Compile errors are printed with your file's
-line numbers, and the last good version keeps playing.
+line numbers, and the last good version keeps playing. `make check` (or
+`scripts/check-effects.sh path/to/yours.glsl`) validates effects with
+glslang without a compositor, which is what CI does for the bundled ones.
 
 Effects are searched, in order, in `$HYPRTRANSITION_EFFECTS`,
 `~/.config/hyprtransition/effects` (yours), `~/.local/share/hyprtransition/effects`

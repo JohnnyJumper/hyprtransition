@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+
+jobs:
+  build:
+    name: Build and check (Arch Linux)
+    runs-on: ubuntu-latest
+    container: archlinux:latest
+    steps:
+      - name: Install dependencies
+        run: pacman -Syu --noconfirm --needed base-devel git wayland wayland-protocols libglvnd lua glslang
+
+      - uses: actions/checkout@v4
+
+      - name: Build (warnings are errors)
+        run: make CFLAGS="-O2 -Werror"
+
+      - name: Validate effects and Lua
+        run: make check
+
+      - name: Version matches the tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          built="$(./build/hyprtransition --version | awk '{print $2}')"
+          tag="${GITHUB_REF_NAME#v}"
+          test "$built" = "$tag" || { echo "binary says $built, tag says $tag"; exit 1; }
+
+      - name: Install into a staging dir
+        run: |
+          make PREFIX=/usr DESTDIR="$PWD/stage" install
+          find stage -type f | sort
+
+  release:
+    name: GitHub release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Create release with generated notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" --title "hyprtransition $GITHUB_REF_NAME" --generate-notes
