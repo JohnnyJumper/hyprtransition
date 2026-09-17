@@ -1,0 +1,20 @@
+pkgbase = hyprtransition
+	pkgdesc = Shader-driven workspace transitions for Hyprland (tear, burn, black hole, page turn, or your own GLSL)
+	pkgver = 0.0.1
+	pkgrel = 1
+	url = https://github.com/JohnnyJumper/hyprtransition
+	arch = x86_64
+	arch = aarch64
+	license = MIT
+	makedepends = wayland-protocols
+	makedepends = pkgconf
+	depends = wayland
+	depends = libglvnd
+	depends = grim
+	depends = lua
+	depends = hyprland
+	optdepends = glslang: validate your own effects with make check
+	source = hyprtransition-0.0.1.tar.gz::https://github.com/JohnnyJumper/hyprtransition/archive/refs/tags/v0.0.1.tar.gz
+	sha256sums = c89bcabc0e8032307221307d8eaa258e2c4465da444e808dbc5ff1273fa7c03f
+
+pkgname = hyprtransition

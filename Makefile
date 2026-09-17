@@ -31,7 +31,7 @@ HDR      = $(patsubst %.xml,build/gen/%-client-protocol.h,$(notdir $(XMLS)))
 all: build/hyprtransition
 
 build/hyprtransition: src/hyprtransition.c $(GEN) $(HDR) build/gen/shaders.h
-	$(CC) $(CFLAGS) -Ibuild/gen -o $@ src/hyprtransition.c $(GEN) $(LDLIBS)
+	$(CC) $(CFLAGS) $(LDFLAGS) -Ibuild/gen -o $@ src/hyprtransition.c $(GEN) $(LDLIBS)
 
 SHADERS = src/vertex.glsl src/prelude.glsl src/postlude.glsl
 build/gen/shaders.h: $(SHADERS) scripts/embed-glsl.sh | build/gen

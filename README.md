@@ -44,7 +44,8 @@ compositor patching, nothing that breaks on Hyprland updates.
 git clone https://github.com/JohnnyJumper/hyprtransition
 cd hyprtransition
 sudo make install        # system-wide, PREFIX=/usr/local by default
-# Arch: makepkg -si      # uses the included PKGBUILD
+# Arch, from the AUR:
+yay -S hyprtransition    # or hyprtransition-git for the latest main
 # or, without root:
 make install-user        # ~/.local/bin + ~/.local/share/hyprtransition/ — nothing touches ~/.config
 ```
@@ -195,6 +196,16 @@ hyprtransition [-e EFFECT] [-o OUTPUT] [-d MS] [-s SEED] [-c] [--loop] [--then C
 - Workspace-swipe gestures: the swipe already animated the change visually, so
   the effect will replay it. Set `HyprTransition.enabled = false` around
   gesture use if that bothers you.
+
+## Releasing
+
+1. Bump `VERSION` in the `Makefile`, commit, tag `vX.Y.Z`, push the tag. CI
+   checks the binary reports the same version and creates the GitHub release.
+2. In `packaging/aur/hyprtransition/PKGBUILD` set `pkgver`, reset `pkgrel=1`,
+   and update `sha256sums` with the tarball's hash:
+   `curl -sL https://github.com/JohnnyJumper/hyprtransition/archive/refs/tags/vX.Y.Z.tar.gz | sha256sum`
+3. `packaging/aur/publish.sh hyprtransition` — regenerates `.SRCINFO` and pushes
+   to the AUR. The `-git` package only needs publishing when its PKGBUILD changes.
 
 ## Why isn't this a hyprpm plugin?
 

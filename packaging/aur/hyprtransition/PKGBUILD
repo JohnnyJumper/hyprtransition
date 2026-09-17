@@ -1,0 +1,24 @@
+# Maintainer: JohnnyJumper <jeyhunt@gmail.com>
+pkgname=hyprtransition
+pkgver=0.0.1
+pkgrel=1
+pkgdesc="Shader-driven workspace transitions for Hyprland (tear, burn, black hole, page turn, or your own GLSL)"
+arch=('x86_64' 'aarch64')
+url="https://github.com/JohnnyJumper/hyprtransition"
+license=('MIT')
+depends=('wayland' 'libglvnd' 'grim' 'lua' 'hyprland')
+makedepends=('wayland-protocols' 'pkgconf')
+optdepends=('glslang: validate your own effects with make check')
+source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('c89bcabc0e8032307221307d8eaa258e2c4465da444e808dbc5ff1273fa7c03f')
+
+build() {
+    cd "$pkgname-$pkgver"
+    make PREFIX=/usr
+}
+
+package() {
+    cd "$pkgname-$pkgver"
+    make PREFIX=/usr DESTDIR="$pkgdir" install
+    install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

@@ -1,16 +1,17 @@
 # Maintainer: JohnnyJumper <jeyhunt@gmail.com>
 pkgname=hyprtransition-git
-pkgver=r1
+pkgver=r11.4551c3b
 pkgrel=1
-pkgdesc="Shader-driven workspace transitions for Hyprland (tear, burn, tiles, or your own GLSL)"
+pkgdesc="Shader-driven workspace transitions for Hyprland (tear, burn, black hole, page turn, or your own GLSL) - git version"
 arch=('x86_64' 'aarch64')
 url="https://github.com/JohnnyJumper/hyprtransition"
 license=('MIT')
 depends=('wayland' 'libglvnd' 'grim' 'lua' 'hyprland')
 makedepends=('git' 'wayland-protocols' 'pkgconf')
+optdepends=('glslang: validate your own effects with make check')
 provides=('hyprtransition')
 conflicts=('hyprtransition')
-source=("git+$url.git")
+source=("git+$url.git#branch=main")
 sha256sums=('SKIP')
 
 pkgver() {
