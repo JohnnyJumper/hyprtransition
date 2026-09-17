@@ -1,141 +1,144 @@
 -- hyprtransition — purely visual workspace transitions for Hyprland's Lua config.
 --
--- Usage (anywhere in your hyprland.lua):
---
---     require("hyprtransition").setup()           -- system install (module is on the Lua path)
---
---     -- user install (nothing is placed in ~/.config/hypr, so load it by path):
+--     require("hyprtransition").setup()
 --     dofile(os.getenv("HOME") .. "/.local/share/hyprtransition/hyprtransition.lua").setup()
 --
--- Settings come from ~/.config/hyprtransition/config.lua (see config.example.lua);
--- anything passed to setup({ ... }) overrides the file, e.g. setup({ effect = "burn" }).
--- Remove the line to turn it off.
+-- Settings come from ~/.config/hyprtransition/config.lua; setup({ ... }) overrides them.
 --
--- It knows nothing about your keys, your workspace count or your plugins: it
--- reacts to the workspace *changing*, however that happened (keys, scroll,
--- waybar, hyprctl, a plugin's dispatcher).
---
--- How: Hyprland fires `workspace.active` synchronously inside the switch,
--- before anything has been drawn. We step back to the old workspace right there
--- (invisible), spawn `hyprtransition` to screenshot it and cover the monitor
--- with a click-through overlay, and the moment Hyprland reports that overlay
--- as opened we switch forward underneath it. The effect then reveals it.
---
--- At runtime, from a bind or a terminal (a `hyprctl reload` resets to setup()):
---
---     hyprctl dispatch '(function() HyprTransition.enabled = not HyprTransition.enabled return hl.dsp.no_op() end)()'
---     hyprctl dispatch '(function() HyprTransition.effect = "burn" return hl.dsp.no_op() end)()'
+-- Hyprland fires `workspace.active` inside the switch, before anything is drawn.
+-- We step back to the old workspace right there, spawn `hyprtransition` to cover
+-- the monitor with a screenshot of it, and switch forward once the cover is up.
 
 local M = {}
 
 local defaults = {
-	effect = "tear", -- name in an effects dir, or a list to pick from at random
-	duration = nil, -- ms; nil = the effect's own "// duration:" line
-	cursor = false, -- include the mouse cursor in the captured screen
-	fallback_ms = 400, -- if the overlay never shows up (binary missing?), switch anyway after this
-	disable_workspace_animation = true, -- the effect replaces Hyprland's own slide
-	bin = "hyprtransition", -- the binary; anything your shell can find
+	effect = "tear", -- a name, or a list to pick from at random
+	duration = nil, -- ms; nil = the effect file's own "// duration:" line
+	cursor = false,
+	fallback_ms = 400, -- switch anyway if the overlay never appears
+	disable_workspace_animation = true,
+	bin = "hyprtransition",
 }
 
--- ---------------------------------------------------------------- config file
+local NAMESPACE = "hyprtransition"
 
-local function config_dir()
-	local xdg = os.getenv("XDG_CONFIG_HOME")
-	if xdg then
-		return xdg .. "/hyprtransition"
-	end
-	return (os.getenv("HOME") or "~") .. "/.config/hyprtransition"
+-- ---------------------------------------------------------------- config
+
+local function config_path()
+	local base = os.getenv("XDG_CONFIG_HOME") or (os.getenv("HOME") .. "/.config")
+	return base .. "/hyprtransition/config.lua"
 end
 
--- config.lua must `return { ... }`; a broken file is reported as a notification
--- and ignored rather than breaking your whole Hyprland config.
+local function report(message)
+	hl.notification.create({ text = "hyprtransition: " .. message, timeout = 8000, color = "rgb(ff5555)" })
+end
+
 local function read_config()
-	local path = config_dir() .. "/config.lua"
-	local f = io.open(path, "r")
-	if not f then
+	local path = config_path()
+	if not io.open(path, "r") then
 		return {}
 	end
-	f:close()
-	local ok, cfg = pcall(dofile, path)
-	if not ok or type(cfg) ~= "table" then
-		hl.notification.create({
-			text = "hyprtransition: " .. (ok and (path .. " must return a table") or tostring(cfg)),
-			timeout = 8000,
-			color = "rgb(ff5555)",
-		})
+	local ok, config = pcall(dofile, path)
+	if not ok then
+		report(config)
 		return {}
 	end
-	return cfg
-end
-
--- ---------------------------------------------------------------- effect
-
-local last = {} -- monitor id -> workspace id we last saw active there
-local suppress = false -- our own switches must not re-trigger us
-local pending = nil -- the forward switch waiting for the overlay to show up
-local busy = false -- an effect is already on screen; don't stack another
-
-local function switch(id)
-	suppress = true
-	pcall(hl.dispatch, hl.dsp.focus({ workspace = id }))
-	suppress = false
-end
-
-local function pick_effect()
-	local e = M.effect
-	if type(e) == "table" then
-		return e[math.random(#e)]
+	if type(config) ~= "table" then
+		report(path .. " must return a table")
+		return {}
 	end
-	return e
+	return config
 end
 
-local function with_effect(mon, action)
-	pending = action
-	busy = true
-	local cmd = string.format("%s -e %s -o %s", M.bin, pick_effect(), mon.name)
+local function merge(target, source)
+	for key, value in pairs(source) do
+		target[key] = value
+	end
+end
+
+-- ---------------------------------------------------------------- switching
+
+local seen = {} -- monitor id -> workspace id last active there
+local own_switch = false
+local reveal = nil -- the forward switch, run once the overlay is up
+local playing = false
+
+local function switch_to(workspace_id)
+	own_switch = true
+	pcall(hl.dispatch, hl.dsp.focus({ workspace = workspace_id }))
+	own_switch = false
+end
+
+local function chosen_effect()
+	local effect = M.effect
+	if type(effect) == "table" then
+		return effect[math.random(#effect)]
+	end
+	return effect
+end
+
+local function command_for(monitor)
+	local parts = { M.bin, "-e", chosen_effect(), "-o", monitor.name }
 	if M.duration then
-		cmd = cmd .. " -d " .. M.duration
+		table.insert(parts, "-d " .. M.duration)
 	end
 	if M.cursor then
-		cmd = cmd .. " -c"
+		table.insert(parts, "-c")
 	end
-	hl.exec_cmd(cmd)
-
-	hl.timer(function()
-		if pending == action then
-			pending = nil
-			action()
-		end
-	end, { timeout = M.fallback_ms, type = "oneshot" })
-
-	hl.timer(function()
-		busy = false
-	end, { timeout = (M.duration or 700) + 100, type = "oneshot" })
+	return table.concat(parts, " ")
 end
 
-local function on_workspace_active(ws)
-	if suppress then
+local function after(ms, fn)
+	hl.timer(fn, { timeout = ms, type = "oneshot" })
+end
+
+local function play(monitor, then_switch)
+	reveal = then_switch
+	playing = true
+	hl.exec_cmd(command_for(monitor))
+
+	after(M.fallback_ms, function()
+		if reveal == then_switch then
+			reveal = nil
+			then_switch()
+		end
+	end)
+	after((M.duration or 700) + 100, function()
+		playing = false
+	end)
+end
+
+local function on_overlay_opened(layer)
+	local ok, namespace = pcall(function()
+		return layer.namespace
+	end)
+	if ok and namespace == NAMESPACE and reveal then
+		local switch = reveal
+		reveal = nil
+		switch()
+	end
+end
+
+local function on_workspace_active(workspace)
+	if own_switch then
 		return
 	end
-	local mon = ws.monitor
-	if not mon then
+	local monitor = workspace.monitor
+	if not monitor then
 		return
 	end
-	local prev = last[mon.id]
-	last[mon.id] = ws.id
-	-- first sighting of this monitor, no actual change, or a special workspace: nothing to do
-	if not prev or prev == ws.id or ws.special then
-		return
-	end
-	if not M.enabled or busy then
+	local previous = seen[monitor.id]
+	seen[monitor.id] = workspace.id
+
+	local changed = previous and previous ~= workspace.id and not workspace.special
+	if not changed or not M.enabled or playing then
 		return
 	end
 
-	-- Nothing has been drawn yet: step back, cover the old screen, then go forward under the cover.
-	local target = ws.id
-	switch(prev)
-	with_effect(mon, function()
-		switch(target)
+	local target = workspace.id
+	switch_to(previous)
+	play(monitor, function()
+		switch_to(target)
 	end)
 end
 
@@ -143,47 +146,25 @@ end
 
 M.enabled = true
 
-function M.setup(opts)
-	for k, v in pairs(defaults) do
-		M[k] = v
-	end
-	for k, v in pairs(read_config()) do
-		M[k] = v
-	end
-	for k, v in pairs(opts or {}) do
-		M[k] = v
-	end
+function M.setup(overrides)
+	merge(M, defaults)
+	merge(M, read_config())
+	merge(M, overrides or {})
 
-	hl.layer_rule({
-		name = "hyprtransition-noanim",
-		match = { namespace = "^hyprtransition$" },
-		no_anim = true,
-	})
-
+	hl.layer_rule({ name = "hyprtransition-noanim", match = { namespace = "^" .. NAMESPACE .. "$" }, no_anim = true })
 	if M.disable_workspace_animation then
 		hl.animation({ leaf = "workspaces", enabled = false, speed = 1, bezier = "default" })
 	end
 
-	for _, mon in ipairs(hl.get_monitors()) do
-		if mon.active_workspace then
-			last[mon.id] = mon.active_workspace.id
+	for _, monitor in ipairs(hl.get_monitors()) do
+		if monitor.active_workspace then
+			seen[monitor.id] = monitor.active_workspace.id
 		end
 	end
-
 	hl.on("workspace.active", on_workspace_active)
+	hl.on("layer.opened", on_overlay_opened)
 
-	hl.on("layer.opened", function(layer)
-		local got, ns = pcall(function()
-			return layer.namespace
-		end)
-		if got and ns == "hyprtransition" and pending then
-			local action = pending
-			pending = nil
-			action()
-		end
-	end)
-
-	HyprTransition = M -- reachable from `hyprctl dispatch` Lua snippets
+	HyprTransition = M -- for `hyprctl dispatch` snippets
 	return M
 end
 

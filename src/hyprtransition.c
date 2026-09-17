@@ -1,42 +1,15 @@
 // hyprtransition — purely visual workspace transitions for Hyprland.
 //
-// 1. screenshots one output (via grim)
-// 2. opens a click-through, fullscreen overlay layer surface on that output
-// 3. plays an effect over the screenshot: a GLSL file from effects/ that
-//    decides, per pixel and per moment, what to show. Wherever it outputs
-//    alpha 0, whatever the compositor is showing underneath comes through
-//    (i.e. the workspace you switched to)
-// 4. exits
-//
-// It never touches workspaces itself. Optionally it runs a command once the
-// overlay is on screen (--then), which is where a workspace switch belongs.
-//
-//   hyprtransition [-e EFFECT] [-o OUTPUT] [-d MS] [-s SEED] [-c] [--loop] [--then CMD]
-//
-//   Defaults for -e, -d and -c can be set in $XDG_CONFIG_HOME/hyprtransition/config.lua
-//   (see config.example.lua); flags override the file.
-//
-//   -e EFFECT   effect name or a path to a .glsl file. Default: tear. Names are
-//               looked up, in order, in $HYPRTRANSITION_EFFECTS,
-//               $XDG_CONFIG_HOME/hyprtransition/effects (your own effects),
-//               $XDG_DATA_HOME/hyprtransition/effects (user install),
-//               <dir of binary>/effects and ../effects (running from a checkout),
-//               DATADIR/effects (system install)
-//   -o OUTPUT   output name (e.g. DP-3). Default: the focused monitor (via hyprctl)
-//   -d MS       total duration in ms. Default: the effect's "// duration:" line, else 700
-//   -s SEED     randomness seed (default: random)
-//   -c          include the cursor in the screenshot
-//   --loop      replay forever, re-reading the effect file each time (for authoring)
-//   --then CMD  run CMD (via sh -c) right after the first frame is committed
-//
-// The effect contract is documented in effects/_template.glsl.
+// Screenshots one output, covers it with a click-through overlay, plays a GLSL
+// effect over the screenshot on a transparent background, exits. Wherever the
+// effect outputs alpha 0, whatever the compositor shows underneath comes through.
+// See effects/_template.glsl for the effect contract.
 
 #define _GNU_SOURCE
-#include <errno.h>
+#include <getopt.h>
 #include <libgen.h>
-#include <math.h>
+#include <stdarg.h>
 #include <stdbool.h>
-#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -56,50 +29,63 @@
 #include "viewporter-client-protocol.h"
 #include "wlr-layer-shell-unstable-v1-client-protocol.h"
 
-#define NAMESPACE "hyprtransition"
-#define DEFAULT_EFFECT "tear"
-#define DEFAULT_DURATION 700
 #ifndef DATADIR
 #define DATADIR "/usr/share/hyprtransition"
 #endif
 
-struct output {
-    struct wl_output *wl;
-    char name[64];
-    int32_t mode_w, mode_h;
-    int32_t transform;
+#define LAYER_NAMESPACE "hyprtransition"
+#define DEFAULT_EFFECT "tear"
+#define DEFAULT_DURATION_MS 700
+#define MAX_OUTPUTS 16
+
+struct options {
+    const char *effect, *output, *then;
+    double duration_ms;
+    float seed;
+    bool cursor, loop;
 };
 
-struct state {
+struct output {
+    struct wl_output *handle;
+    char name[64];
+    int width, height, transform;
+};
+
+struct wayland {
     struct wl_display *display;
     struct wl_compositor *compositor;
     struct zwlr_layer_shell_v1 *layer_shell;
     struct wp_viewporter *viewporter;
-
-    struct output outputs[16];
-    int n_outputs;
-    struct output *out;
-
+    struct output outputs[MAX_OUTPUTS];
+    int output_count;
+    struct output *output;
     struct wl_surface *surface;
     struct zwlr_layer_surface_v1 *layer;
     struct wp_viewport *viewport;
-    struct wl_egl_window *egl_window;
-    int32_t lw, lh; // logical size (from configure)
-    int32_t bw, bh; // buffer size (physical pixels)
-    bool configured, done;
-
-    EGLDisplay egl;
-    EGLContext ctx;
-    EGLSurface esurf;
-    GLuint prog, tex;
-    GLint u_time, u_seed, u_aspect, u_resolution;
-
-    double t0, duration_ms;
-    float seed;
-    bool cursor, loop;
-    const char *out_name, *then, *effect;
-    char effect_path[4096];
+    int logical_width, logical_height;
+    bool configured, closed;
 };
+
+struct gl {
+    EGLDisplay display;
+    EGLContext context;
+    EGLSurface surface;
+    struct wl_egl_window *window;
+    GLuint program, texture;
+    GLint u_time, u_seed, u_aspect, u_resolution;
+};
+
+static struct {
+    struct options opt;
+    struct wayland wl;
+    struct gl gl;
+    char *effect_path;
+    int width, height;
+    double started_at;
+    bool tracing;
+} app;
+
+// ---------------------------------------------------------------- helpers
 
 static double now_ms(void) {
     struct timespec ts;
@@ -107,147 +93,349 @@ static double now_ms(void) {
     return ts.tv_sec * 1000.0 + ts.tv_nsec / 1e6;
 }
 
-static bool debug;
-static double t_start;
-static void mark(const char *what) {
-    if (debug) fprintf(stderr, "hyprtransition: %6.1f ms  %s\n", now_ms() - t_start, what);
-}
-
-static void die(const char *msg) {
-    fprintf(stderr, "hyprtransition: %s\n", msg);
+static _Noreturn void fail(const char *fmt, ...) {
+    va_list args;
+    va_start(args, fmt);
+    fputs("hyprtransition: ", stderr);
+    vfprintf(stderr, fmt, args);
+    fputc('\n', stderr);
+    va_end(args);
     exit(1);
 }
 
-// ---------------------------------------------------------------- wl_output
-
-static void out_geometry(void *d, struct wl_output *o, int32_t x, int32_t y, int32_t pw, int32_t ph, int32_t sub,
-                         const char *make, const char *model, int32_t transform) {
-    (void)o; (void)x; (void)y; (void)pw; (void)ph; (void)sub; (void)make; (void)model;
-    ((struct output *)d)->transform = transform;
+static void warn(const char *fmt, ...) {
+    va_list args;
+    va_start(args, fmt);
+    fputs("hyprtransition: ", stderr);
+    vfprintf(stderr, fmt, args);
+    fputc('\n', stderr);
+    va_end(args);
 }
-static void out_mode(void *d, struct wl_output *o, uint32_t flags, int32_t w, int32_t h, int32_t refresh) {
-    (void)o; (void)refresh;
-    if (flags & WL_OUTPUT_MODE_CURRENT) {
-        ((struct output *)d)->mode_w = w;
-        ((struct output *)d)->mode_h = h;
+
+static void trace(const char *step) {
+    static double origin;
+    if (!origin) origin = now_ms();
+    if (app.tracing) fprintf(stderr, "hyprtransition: %6.1f ms  %s\n", now_ms() - origin, step);
+}
+
+static char *format(const char *fmt, ...) {
+    char *out;
+    va_list args;
+    va_start(args, fmt);
+    if (vasprintf(&out, fmt, args) < 0) fail("out of memory");
+    va_end(args);
+    return out;
+}
+
+static char *read_file(const char *path) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return NULL;
+    fseek(f, 0, SEEK_END);
+    long size = ftell(f);
+    rewind(f);
+    char *text = malloc(size + 1);
+    size_t got = fread(text, 1, size, f);
+    fclose(f);
+    text[got] = 0;
+    return text;
+}
+
+// $VAR if set, else $HOME/<fallback>; NULL when neither is known.
+static char *xdg_dir(const char *var, const char *fallback) {
+    const char *set = getenv(var), *home = getenv("HOME");
+    if (set) return strdup(set);
+    return home ? format("%s/%s", home, fallback) : NULL;
+}
+
+static char *config_dir(void) {
+    char *base = xdg_dir("XDG_CONFIG_HOME", ".config");
+    return base ? format("%s/hyprtransition", base) : NULL;
+}
+
+static char *exe_dir(void) {
+    static char path[4096];
+    ssize_t len = readlink("/proc/self/exe", path, sizeof path - 1);
+    if (len < 0) return NULL;
+    path[len] = 0;
+    return dirname(path);
+}
+
+// Double fork so the child is reparented to init and never needs reaping.
+static void run_detached(const char *command) {
+    pid_t pid = fork();
+    if (pid == 0) {
+        if (fork() == 0) execl("/bin/sh", "sh", "-c", command, (char *)NULL);
+        _exit(0);
+    }
+    waitpid(pid, NULL, 0);
+}
+
+// ---------------------------------------------------------------- options
+
+static _Noreturn void usage(int status) {
+    fputs("usage: hyprtransition [-e EFFECT] [-o OUTPUT] [-d MS] [-s SEED] [-c] [--loop] [--then CMD]\n"
+          "\n"
+          "  -e, --effect NAME     effect name or path to a .glsl file (default: tear)\n"
+          "  -o, --output NAME     monitor to play on (default: the focused one)\n"
+          "  -d, --duration MS     override the effect's own duration\n"
+          "  -s, --seed N          fix the randomness\n"
+          "  -c, --cursor          include the mouse cursor in the screenshot\n"
+          "      --loop            replay forever, re-reading the effect file each cycle\n"
+          "      --then CMD        run CMD once the overlay is on screen\n"
+          "\n"
+          "Defaults for -e, -d and -c come from $XDG_CONFIG_HOME/hyprtransition/config.lua.\n",
+          status ? stderr : stdout);
+    exit(status);
+}
+
+static void parse_args(int argc, char **argv) {
+    static const struct option long_options[] = {
+        { "effect", required_argument, NULL, 'e' }, { "output", required_argument, NULL, 'o' },
+        { "duration", required_argument, NULL, 'd' }, { "seed", required_argument, NULL, 's' },
+        { "cursor", no_argument, NULL, 'c' },         { "loop", no_argument, NULL, 'L' },
+        { "then", required_argument, NULL, 'T' },     { "help", no_argument, NULL, 'h' },
+        { 0 },
+    };
+    struct options *opt = &app.opt;
+    int c;
+    while ((c = getopt_long(argc, argv, "e:o:d:s:ch", long_options, NULL)) != -1) {
+        switch (c) {
+        case 'e': opt->effect = optarg; break;
+        case 'o': opt->output = optarg; break;
+        case 'd': opt->duration_ms = atof(optarg); break;
+        case 's': opt->seed = atof(optarg); break;
+        case 'c': opt->cursor = true; break;
+        case 'L': opt->loop = true; break;
+        case 'T': opt->then = optarg; break;
+        case 'h': usage(0);
+        default: usage(2);
+        }
     }
 }
-static void out_done(void *d, struct wl_output *o) { (void)d; (void)o; }
-static void out_scale(void *d, struct wl_output *o, int32_t s) { (void)d; (void)o; (void)s; }
-static void out_name(void *d, struct wl_output *o, const char *name) {
-    (void)o;
-    snprintf(((struct output *)d)->name, sizeof(((struct output *)d)->name), "%s", name);
-}
-static void out_desc(void *d, struct wl_output *o, const char *desc) { (void)d; (void)o; (void)desc; }
 
-static const struct wl_output_listener output_listener = {
-    .geometry = out_geometry, .mode = out_mode, .done = out_done,
-    .scale = out_scale, .name = out_name, .description = out_desc,
-};
+// ---------------------------------------------------------------- config.lua
 
-// ---------------------------------------------------------------- registry
-
-static void reg_global(void *d, struct wl_registry *reg, uint32_t id, const char *iface, uint32_t ver) {
-    struct state *st = d;
-    if (!strcmp(iface, wl_compositor_interface.name)) {
-        st->compositor = wl_registry_bind(reg, id, &wl_compositor_interface, 4);
-    } else if (!strcmp(iface, zwlr_layer_shell_v1_interface.name)) {
-        st->layer_shell = wl_registry_bind(reg, id, &zwlr_layer_shell_v1_interface, ver < 4 ? ver : 4);
-    } else if (!strcmp(iface, wp_viewporter_interface.name)) {
-        st->viewporter = wl_registry_bind(reg, id, &wp_viewporter_interface, 1);
-    } else if (!strcmp(iface, wl_output_interface.name) && st->n_outputs < 16) {
-        if (ver < 4) return; // need the name event
-        struct output *o = &st->outputs[st->n_outputs++];
-        o->wl = wl_registry_bind(reg, id, &wl_output_interface, 4);
-        wl_output_add_listener(o->wl, &output_listener, o);
-    }
-}
-static void reg_remove(void *d, struct wl_registry *r, uint32_t id) { (void)d; (void)r; (void)id; }
-static const struct wl_registry_listener registry_listener = { reg_global, reg_remove };
-
-// ---------------------------------------------------------------- layer surface
-
-static void layer_configure(void *d, struct zwlr_layer_surface_v1 *ls, uint32_t serial, uint32_t w, uint32_t h) {
-    struct state *st = d;
-    zwlr_layer_surface_v1_ack_configure(ls, serial);
-    st->lw = (int32_t)w;
-    st->lh = (int32_t)h;
-    st->configured = true;
-}
-static void layer_closed(void *d, struct zwlr_layer_surface_v1 *ls) {
-    (void)ls;
-    ((struct state *)d)->done = true;
-}
-static const struct zwlr_layer_surface_v1_listener layer_listener = { layer_configure, layer_closed };
-
-// ---------------------------------------------------------------- config file
-
-static void config_dir(char *out, size_t n) {
-    const char *xdg = getenv("XDG_CONFIG_HOME"), *home = getenv("HOME");
-    if (xdg) snprintf(out, n, "%s/hyprtransition", xdg);
-    else if (home) snprintf(out, n, "%s/.config/hyprtransition", home);
-    else out[0] = 0;
+static char *lua_string_field(lua_State *L, const char *key) {
+    lua_getfield(L, 1, key);
+    bool list = lua_istable(L, -1) && lua_rawlen(L, -1) > 0;
+    if (list) lua_rawgeti(L, -1, 1 + rand() % (int)lua_rawlen(L, -1));
+    const char *value = lua_tostring(L, -1);
+    char *copy = value ? strdup(value) : NULL;
+    lua_settop(L, 1);
+    return copy;
 }
 
-// Evaluates config.lua and takes effect / duration / cursor from the returned
-// table, only where the command line did not set them. Same file the Lua
-// module reads, so both halves agree.
-static void load_config(struct state *st) {
-    char dir[1024], path[1100];
-    config_dir(dir, sizeof dir);
-    if (!dir[0]) return;
-    snprintf(path, sizeof path, "%s/config.lua", dir);
+static double lua_number_field(lua_State *L, const char *key) {
+    lua_getfield(L, 1, key);
+    double value = lua_tonumber(L, -1);
+    lua_settop(L, 1);
+    return value;
+}
+
+static bool lua_bool_field(lua_State *L, const char *key) {
+    lua_getfield(L, 1, key);
+    bool value = lua_toboolean(L, -1);
+    lua_settop(L, 1);
+    return value;
+}
+
+// Fills in whatever the command line left unset. Same file the Lua module reads.
+static void apply_config_file(void) {
+    char *dir = config_dir();
+    if (!dir) return;
+    char *path = format("%s/config.lua", dir);
     if (access(path, R_OK) != 0) return;
 
     lua_State *L = luaL_newstate();
     luaL_openlibs(L);
     if (luaL_dofile(L, path) != LUA_OK) {
-        fprintf(stderr, "hyprtransition: %s\n", lua_tostring(L, -1));
-        lua_close(L);
-        return;
-    }
-    if (!lua_istable(L, -1)) {
-        fprintf(stderr, "hyprtransition: %s must `return { ... }`\n", path);
-        lua_close(L);
-        return;
-    }
-
-    if (!st->effect) {
-        lua_getfield(L, -1, "effect");
-        if (lua_isstring(L, -1)) {
-            st->effect = strdup(lua_tostring(L, -1));
-        } else if (lua_istable(L, -1) && lua_rawlen(L, -1) > 0) { // a list: pick one at random
-            lua_rawgeti(L, -1, 1 + rand() % (int)lua_rawlen(L, -1));
-            if (lua_isstring(L, -1)) st->effect = strdup(lua_tostring(L, -1));
-            lua_pop(L, 1);
-        }
-        lua_pop(L, 1);
-    }
-    if (st->duration_ms <= 0) {
-        lua_getfield(L, -1, "duration");
-        if (lua_isnumber(L, -1)) st->duration_ms = lua_tonumber(L, -1);
-        lua_pop(L, 1);
-    }
-    if (!st->cursor) {
-        lua_getfield(L, -1, "cursor");
-        st->cursor = lua_toboolean(L, -1);
-        lua_pop(L, 1);
+        warn("%s", lua_tostring(L, -1));
+    } else if (!lua_istable(L, 1)) {
+        warn("%s must `return { ... }`", path);
+    } else {
+        struct options *opt = &app.opt;
+        if (!opt->effect) opt->effect = lua_string_field(L, "effect");
+        if (opt->duration_ms <= 0) opt->duration_ms = lua_number_field(L, "duration");
+        opt->cursor = opt->cursor || lua_bool_field(L, "cursor");
     }
     lua_close(L);
 }
 
-// ---------------------------------------------------------------- effect files
+// ---------------------------------------------------------------- effects
 
-static const char *VS =
+// Earlier directories shadow later ones, so a user's tear.glsl beats the bundled one.
+static char **effect_dirs(void) {
+    static char *dirs[8];
+    int n = 0;
+    char *env = getenv("HYPRTRANSITION_EFFECTS"), *config = config_dir(), *data = xdg_dir("XDG_DATA_HOME", ".local/share"), *exe = exe_dir();
+    if (env) dirs[n++] = strdup(env);
+    if (config) dirs[n++] = format("%s/effects", config);
+    if (data) dirs[n++] = format("%s/hyprtransition/effects", data);
+    if (exe) dirs[n++] = format("%s/effects", exe);
+    if (exe) dirs[n++] = format("%s/../effects", exe);
+    dirs[n++] = DATADIR "/effects";
+    dirs[n] = NULL;
+    return dirs;
+}
+
+static char *find_effect(const char *name) {
+    if (strchr(name, '/')) return strdup(name);
+    char **dirs = effect_dirs();
+    for (int i = 0; dirs[i]; i++) {
+        char *path = format("%s/%s.glsl", dirs[i], name);
+        if (access(path, R_OK) == 0) return path;
+        free(path);
+    }
+    warn("no effect named '%s' in:", name);
+    for (int i = 0; dirs[i]; i++) fprintf(stderr, "  %s\n", dirs[i]);
+    exit(1);
+}
+
+static double declared_duration(const char *source) {
+    const char *tag = "// duration:";
+    const char *found = strstr(source, tag);
+    return found ? atof(found + strlen(tag)) : 0;
+}
+
+// ---------------------------------------------------------------- hyprctl
+
+static char *focused_output_name(void) {
+    FILE *pipe = popen("hyprctl activeworkspace -j 2>/dev/null", "r");
+    if (!pipe) return NULL;
+    char line[512], name[64] = "";
+    while (fgets(line, sizeof line, pipe)) {
+        char *field = strstr(line, "\"monitor\": \"");
+        if (field) sscanf(field + 12, "%63[^\"]", name);
+    }
+    pclose(pipe);
+    return name[0] ? strdup(name) : NULL;
+}
+
+// ---------------------------------------------------------------- wayland
+
+static void on_output_geometry(void *data, struct wl_output *o, int32_t x, int32_t y, int32_t pw, int32_t ph,
+                               int32_t subpixel, const char *make, const char *model, int32_t transform) {
+    (void)o; (void)x; (void)y; (void)pw; (void)ph; (void)subpixel; (void)make; (void)model;
+    ((struct output *)data)->transform = transform;
+}
+
+static void on_output_mode(void *data, struct wl_output *o, uint32_t flags, int32_t w, int32_t h, int32_t refresh) {
+    (void)o; (void)refresh;
+    struct output *out = data;
+    if (flags & WL_OUTPUT_MODE_CURRENT) out->width = w, out->height = h;
+}
+
+static void on_output_name(void *data, struct wl_output *o, const char *name) {
+    (void)o;
+    snprintf(((struct output *)data)->name, sizeof ((struct output *)data)->name, "%s", name);
+}
+
+static void on_output_ignore(void *data, struct wl_output *o) { (void)data; (void)o; }
+static void on_output_scale(void *data, struct wl_output *o, int32_t s) { (void)data; (void)o; (void)s; }
+static void on_output_description(void *data, struct wl_output *o, const char *d) { (void)data; (void)o; (void)d; }
+
+static const struct wl_output_listener output_listener = {
+    .geometry = on_output_geometry, .mode = on_output_mode, .done = on_output_ignore,
+    .scale = on_output_scale, .name = on_output_name, .description = on_output_description,
+};
+
+static void on_global(void *data, struct wl_registry *registry, uint32_t id, const char *interface, uint32_t version) {
+    (void)data;
+    struct wayland *wl = &app.wl;
+    if (!strcmp(interface, wl_compositor_interface.name))
+        wl->compositor = wl_registry_bind(registry, id, &wl_compositor_interface, 4);
+    if (!strcmp(interface, zwlr_layer_shell_v1_interface.name))
+        wl->layer_shell = wl_registry_bind(registry, id, &zwlr_layer_shell_v1_interface, version < 4 ? version : 4);
+    if (!strcmp(interface, wp_viewporter_interface.name))
+        wl->viewporter = wl_registry_bind(registry, id, &wp_viewporter_interface, 1);
+    bool named_output = !strcmp(interface, wl_output_interface.name) && version >= 4;
+    if (named_output && wl->output_count < MAX_OUTPUTS) {
+        struct output *out = &wl->outputs[wl->output_count++];
+        out->handle = wl_registry_bind(registry, id, &wl_output_interface, 4);
+        wl_output_add_listener(out->handle, &output_listener, out);
+    }
+}
+
+static void on_global_remove(void *data, struct wl_registry *registry, uint32_t id) { (void)data; (void)registry; (void)id; }
+static const struct wl_registry_listener registry_listener = { on_global, on_global_remove };
+
+static void on_layer_configure(void *data, struct zwlr_layer_surface_v1 *layer, uint32_t serial, uint32_t w, uint32_t h) {
+    (void)data;
+    zwlr_layer_surface_v1_ack_configure(layer, serial);
+    app.wl.logical_width = w;
+    app.wl.logical_height = h;
+    app.wl.configured = true;
+}
+
+static void on_layer_closed(void *data, struct zwlr_layer_surface_v1 *layer) {
+    (void)data; (void)layer;
+    app.wl.closed = true;
+}
+
+static const struct zwlr_layer_surface_v1_listener layer_listener = { on_layer_configure, on_layer_closed };
+
+static void connect_wayland(void) {
+    struct wayland *wl = &app.wl;
+    wl->display = wl_display_connect(NULL);
+    if (!wl->display) fail("cannot connect to the Wayland display");
+    wl_registry_add_listener(wl_display_get_registry(wl->display), &registry_listener, NULL);
+    wl_display_roundtrip(wl->display); // globals
+    wl_display_roundtrip(wl->display); // output events
+    if (!wl->compositor || !wl->layer_shell || !wl->viewporter) fail("compositor lacks wl_compositor, layer-shell or viewporter");
+    if (wl->output_count == 0) fail("no outputs");
+}
+
+static struct output *find_output(const char *name) {
+    struct wayland *wl = &app.wl;
+    if (!name) return &wl->outputs[0];
+    for (int i = 0; i < wl->output_count; i++)
+        if (!strcmp(wl->outputs[i].name, name)) return &wl->outputs[i];
+    fail("no output named '%s'", name);
+    return NULL;
+}
+
+static void create_overlay(void) {
+    struct wayland *wl = &app.wl;
+    wl->surface = wl_compositor_create_surface(wl->compositor);
+    struct wl_region *nothing = wl_compositor_create_region(wl->compositor);
+    wl_surface_set_input_region(wl->surface, nothing); // clicks pass through
+    wl_region_destroy(nothing);
+    wl->viewport = wp_viewporter_get_viewport(wl->viewporter, wl->surface);
+
+    wl->layer = zwlr_layer_shell_v1_get_layer_surface(wl->layer_shell, wl->surface, wl->output->handle,
+                                                      ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY, LAYER_NAMESPACE);
+    zwlr_layer_surface_v1_add_listener(wl->layer, &layer_listener, NULL);
+    zwlr_layer_surface_v1_set_anchor(wl->layer, ZWLR_LAYER_SURFACE_V1_ANCHOR_TOP | ZWLR_LAYER_SURFACE_V1_ANCHOR_BOTTOM |
+                                                    ZWLR_LAYER_SURFACE_V1_ANCHOR_LEFT | ZWLR_LAYER_SURFACE_V1_ANCHOR_RIGHT);
+    zwlr_layer_surface_v1_set_exclusive_zone(wl->layer, -1);
+    zwlr_layer_surface_v1_set_keyboard_interactivity(wl->layer, ZWLR_LAYER_SURFACE_V1_KEYBOARD_INTERACTIVITY_NONE);
+    zwlr_layer_surface_v1_set_size(wl->layer, 0, 0);
+    wl_surface_commit(wl->surface);
+    while (!wl->configured && wl_display_dispatch(wl->display) != -1) {}
+    if (wl->logical_width <= 0 || wl->logical_height <= 0) fail("compositor gave the overlay no size");
+
+    // Render at physical resolution so the screenshot stays pixel-exact under
+    // fractional scaling; the viewport maps the buffer onto the logical size.
+    struct output *out = wl->output;
+    bool rotated = out->transform & 1;
+    app.width = rotated ? out->height : out->width;
+    app.height = rotated ? out->width : out->height;
+    if (app.width <= 0 || app.height <= 0) app.width = wl->logical_width, app.height = wl->logical_height;
+    wp_viewport_set_destination(wl->viewport, wl->logical_width, wl->logical_height);
+}
+
+// ---------------------------------------------------------------- shaders
+
+static const char *VERTEX_SHADER =
     "attribute vec2 a_pos;\n"
     "varying vec2 v_uv;\n"
     "void main() {\n"
-    "  v_uv = vec2(a_pos.x * 0.5 + 0.5, 0.5 - a_pos.y * 0.5);\n" // (0,0) = top-left, like the screenshot
+    "  v_uv = vec2(a_pos.x * 0.5 + 0.5, 0.5 - a_pos.y * 0.5);\n"
     "  gl_Position = vec4(a_pos, 0.0, 1.0);\n"
     "}\n";
 
-// Everything an effect file can rely on. Keep in sync with effects/_template.glsl.
-static const char *PRELUDE =
+// Everything an effect file may use. Documented in effects/_template.glsl.
+static const char *EFFECT_PRELUDE =
     "precision highp float;\n"
     "varying vec2 v_uv;\n"
     "uniform sampler2D u_tex;\n"
@@ -255,7 +443,6 @@ static const char *PRELUDE =
     "uniform float u_seed;\n"
     "uniform float u_aspect;\n"
     "uniform vec2 u_resolution;\n"
-    "\n"
     "float hash(float n) { return fract(sin(n * 127.1 + u_seed * 311.7) * 43758.5453); }\n"
     "float hash2(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7)) + u_seed * 74.7) * 43758.5453); }\n"
     "float vnoise(float x) { float i = floor(x); return mix(hash(i), hash(i + 1.0), fract(x)); }\n"
@@ -279,366 +466,229 @@ static const char *PRELUDE =
     "}\n"
     "#line 1\n";
 
-static const char *POSTLUDE =
+static const char *EFFECT_POSTLUDE =
     "\nvoid main() {\n"
     "  vec4 c = effect(v_uv, u_time);\n"
-    "  gl_FragColor = vec4(c.rgb * c.a, c.a);\n" // straight alpha in, premultiplied out
+    "  gl_FragColor = vec4(c.rgb * c.a, c.a);\n"
     "}\n";
 
-static char *read_file(const char *path) {
-    FILE *f = fopen(path, "rb");
-    if (!f) return NULL;
-    fseek(f, 0, SEEK_END);
-    long n = ftell(f);
-    fseek(f, 0, SEEK_SET);
-    char *buf = malloc(n + 1);
-    if (fread(buf, 1, n, f) != (size_t)n) { free(buf); fclose(f); return NULL; }
-    buf[n] = 0;
-    fclose(f);
-    return buf;
-}
-
-// "-e some/path.glsl" is used as is; "-e NAME" is searched for as NAME.glsl in
-// the directories listed at the top of this file. Earlier entries shadow later
-// ones, so a user's own tear.glsl overrides the bundled one.
-static void resolve_effect(struct state *st) {
-    if (strchr(st->effect, '/')) {
-        snprintf(st->effect_path, sizeof st->effect_path, "%s", st->effect);
-        return;
-    }
-    char exe[4096], dirs[7][1024], cfg[1024];
-    int n_dirs = 0;
-    const char *env = getenv("HYPRTRANSITION_EFFECTS"), *home = getenv("HOME"), *xdg_data = getenv("XDG_DATA_HOME");
-    if (env) snprintf(dirs[n_dirs++], 1024, "%s", env);
-    config_dir(cfg, sizeof cfg);
-    if (cfg[0]) snprintf(dirs[n_dirs++], 1024, "%.1000s/effects", cfg);
-    if (xdg_data) snprintf(dirs[n_dirs++], 1024, "%s/hyprtransition/effects", xdg_data);
-    else if (home) snprintf(dirs[n_dirs++], 1024, "%s/.local/share/hyprtransition/effects", home);
-    ssize_t n = readlink("/proc/self/exe", exe, sizeof exe - 1);
-    if (n >= 0) {
-        exe[n] = 0;
-        const char *d = dirname(exe);
-        snprintf(dirs[n_dirs++], 1024, "%s/effects", d);
-        snprintf(dirs[n_dirs++], 1024, "%s/../effects", d);
-    }
-    snprintf(dirs[n_dirs++], 1024, "%s/effects", DATADIR);
-
-    for (int i = 0; i < n_dirs; i++) {
-        snprintf(st->effect_path, sizeof st->effect_path, "%.1023s/%.255s.glsl", dirs[i], st->effect);
-        if (access(st->effect_path, R_OK) == 0) return;
-    }
-    fprintf(stderr, "hyprtransition: no effect named '%s' in:\n", st->effect);
-    for (int i = 0; i < n_dirs; i++) fprintf(stderr, "  %s\n", dirs[i]);
-    exit(1);
-}
-
-// Asks hyprctl which monitor is focused. Returns false if that fails for any reason.
-static bool focused_output(char *out, size_t n) {
-    FILE *f = popen("hyprctl monitors -j 2>/dev/null", "r");
-    if (!f) return false;
-    char line[512], name[64] = "";
-    bool found = false;
-    // hyprctl prints one key per line; "name" precedes "focused" within each monitor
-    while (fgets(line, sizeof line, f)) {
-        char *p;
-        if ((p = strstr(line, "\"name\": \""))) {
-            p += 9;
-            char *e = strchr(p, '"');
-            if (e) { *e = 0; snprintf(name, sizeof name, "%s", p); }
-        } else if (strstr(line, "\"focused\": true") && name[0]) {
-            snprintf(out, n, "%s", name);
-            found = true;
-        }
-    }
-    pclose(f);
-    return found;
-}
-
-// Reads an optional "// duration: MS" line from the effect source.
-static double effect_duration(const char *src) {
-    const char *p = strstr(src, "// duration:");
-    return p ? atof(p + strlen("// duration:")) : 0;
-}
-
-static GLuint compile(GLenum type, const char *src, const char *what) {
-    GLuint s = glCreateShader(type);
-    glShaderSource(s, 1, &src, NULL);
-    glCompileShader(s);
+static GLuint compile_shader(GLenum type, const char *source, const char *label) {
+    GLuint shader = glCreateShader(type);
+    glShaderSource(shader, 1, &source, NULL);
+    glCompileShader(shader);
     GLint ok;
-    glGetShaderiv(s, GL_COMPILE_STATUS, &ok);
-    if (!ok) {
-        char log[4096];
-        glGetShaderInfoLog(s, sizeof log, NULL, log);
-        fprintf(stderr, "hyprtransition: %s failed to compile:\n%s", what, log);
-        glDeleteShader(s);
-        return 0;
-    }
-    return s;
+    glGetShaderiv(shader, GL_COMPILE_STATUS, &ok);
+    if (ok) return shader;
+    char log[4096];
+    glGetShaderInfoLog(shader, sizeof log, NULL, log);
+    warn("%s failed to compile:\n%s", label, log);
+    glDeleteShader(shader);
+    return 0;
 }
 
-// Builds the program from the effect file. Returns false (and keeps the old
-// program, if any) when the file is missing or does not compile.
-static bool load_effect(struct state *st) {
-    char *src = read_file(st->effect_path);
-    if (!src) {
-        fprintf(stderr, "hyprtransition: cannot read effect %s\n", st->effect_path);
+static GLuint link_program(GLuint vertex, GLuint fragment) {
+    GLuint program = glCreateProgram();
+    glAttachShader(program, vertex);
+    glAttachShader(program, fragment);
+    glBindAttribLocation(program, 0, "a_pos");
+    glLinkProgram(program);
+    glDeleteShader(vertex);
+    glDeleteShader(fragment);
+    GLint ok;
+    glGetProgramiv(program, GL_LINK_STATUS, &ok);
+    if (ok) return program;
+    char log[4096];
+    glGetProgramInfoLog(program, sizeof log, NULL, log);
+    warn("%s failed to link:\n%s", app.effect_path, log);
+    glDeleteProgram(program);
+    return 0;
+}
+
+static void use_program(GLuint program) {
+    struct gl *gl = &app.gl;
+    if (gl->program) glDeleteProgram(gl->program);
+    gl->program = program;
+    glUseProgram(program);
+    gl->u_time = glGetUniformLocation(program, "u_time");
+    gl->u_seed = glGetUniformLocation(program, "u_seed");
+    gl->u_aspect = glGetUniformLocation(program, "u_aspect");
+    gl->u_resolution = glGetUniformLocation(program, "u_resolution");
+    glUniform1i(glGetUniformLocation(program, "u_tex"), 0);
+    glUniform1f(gl->u_seed, app.opt.seed);
+    glUniform1f(gl->u_aspect, (float)app.wl.logical_width / app.wl.logical_height);
+    glUniform2f(gl->u_resolution, app.width, app.height);
+}
+
+// Keeps the current program when the file is missing or broken.
+static bool load_effect(void) {
+    char *body = read_file(app.effect_path);
+    if (!body) {
+        warn("cannot read %s", app.effect_path);
         return false;
     }
-    if (st->duration_ms <= 0) {
-        double d = effect_duration(src);
-        st->duration_ms = d > 0 ? d : DEFAULT_DURATION;
-    }
+    if (app.opt.duration_ms <= 0) app.opt.duration_ms = declared_duration(body);
+    if (app.opt.duration_ms <= 0) app.opt.duration_ms = DEFAULT_DURATION_MS;
 
-    size_t n = strlen(PRELUDE) + strlen(src) + strlen(POSTLUDE) + 1;
-    char *full = malloc(n);
-    snprintf(full, n, "%s%s%s", PRELUDE, src, POSTLUDE);
-    free(src);
+    char *source = format("%s%s%s", EFFECT_PRELUDE, body, EFFECT_POSTLUDE);
+    free(body);
+    GLuint vertex = compile_shader(GL_VERTEX_SHADER, VERTEX_SHADER, "vertex shader");
+    GLuint fragment = compile_shader(GL_FRAGMENT_SHADER, source, app.effect_path);
+    free(source);
+    if (!vertex || !fragment) return false;
 
-    GLuint vs = compile(GL_VERTEX_SHADER, VS, "vertex shader");
-    GLuint fs = compile(GL_FRAGMENT_SHADER, full, st->effect_path);
-    free(full);
-    if (!vs || !fs) return false;
-
-    GLuint prog = glCreateProgram();
-    glAttachShader(prog, vs);
-    glAttachShader(prog, fs);
-    glBindAttribLocation(prog, 0, "a_pos");
-    glLinkProgram(prog);
-    glDeleteShader(vs);
-    glDeleteShader(fs);
-    GLint ok;
-    glGetProgramiv(prog, GL_LINK_STATUS, &ok);
-    if (!ok) {
-        char log[4096];
-        glGetProgramInfoLog(prog, sizeof log, NULL, log);
-        fprintf(stderr, "hyprtransition: %s failed to link:\n%s", st->effect_path, log);
-        glDeleteProgram(prog);
-        return false;
-    }
-
-    if (st->prog) glDeleteProgram(st->prog);
-    st->prog = prog;
-    glUseProgram(prog);
-    st->u_time = glGetUniformLocation(prog, "u_time");
-    st->u_seed = glGetUniformLocation(prog, "u_seed");
-    st->u_aspect = glGetUniformLocation(prog, "u_aspect");
-    st->u_resolution = glGetUniformLocation(prog, "u_resolution");
-    glUniform1i(glGetUniformLocation(prog, "u_tex"), 0);
-    glUniform1f(st->u_seed, st->seed);
-    glUniform1f(st->u_aspect, (float)st->lw / (float)st->lh);
-    glUniform2f(st->u_resolution, (float)st->bw, (float)st->bh);
+    GLuint program = link_program(vertex, fragment);
+    if (!program) return false;
+    use_program(program);
     return true;
 }
 
-// ---------------------------------------------------------------- GL
+// ---------------------------------------------------------------- gl
 
-static void gl_init(struct state *st) {
-    st->egl = eglGetPlatformDisplay(EGL_PLATFORM_WAYLAND_KHR, st->display, NULL);
-    if (st->egl == EGL_NO_DISPLAY) st->egl = eglGetDisplay((EGLNativeDisplayType)st->display);
-    if (st->egl == EGL_NO_DISPLAY || !eglInitialize(st->egl, NULL, NULL)) die("eglInitialize failed");
+static void init_gl(void) {
+    struct gl *gl = &app.gl;
+    gl->display = eglGetPlatformDisplay(EGL_PLATFORM_WAYLAND_KHR, app.wl.display, NULL);
+    if (gl->display == EGL_NO_DISPLAY || !eglInitialize(gl->display, NULL, NULL)) fail("eglInitialize failed");
     eglBindAPI(EGL_OPENGL_ES_API);
-    mark("  eglInitialize");
 
-    EGLint attr[] = { EGL_SURFACE_TYPE, EGL_WINDOW_BIT, EGL_RENDERABLE_TYPE, EGL_OPENGL_ES2_BIT,
-                      EGL_RED_SIZE, 8, EGL_GREEN_SIZE, 8, EGL_BLUE_SIZE, 8, EGL_ALPHA_SIZE, 8, EGL_NONE };
-    EGLConfig cfg;
-    EGLint n;
-    if (!eglChooseConfig(st->egl, attr, &cfg, 1, &n) || n < 1) die("no EGL config with alpha");
+    static const EGLint config_attribs[] = { EGL_SURFACE_TYPE, EGL_WINDOW_BIT, EGL_RENDERABLE_TYPE, EGL_OPENGL_ES2_BIT,
+                                             EGL_RED_SIZE, 8, EGL_GREEN_SIZE, 8, EGL_BLUE_SIZE, 8, EGL_ALPHA_SIZE, 8, EGL_NONE };
+    static const EGLint context_attribs[] = { EGL_CONTEXT_CLIENT_VERSION, 2, EGL_NONE };
+    EGLConfig config;
+    EGLint count;
+    if (!eglChooseConfig(gl->display, config_attribs, &config, 1, &count) || count < 1) fail("no EGL config with alpha");
+    gl->context = eglCreateContext(gl->display, config, EGL_NO_CONTEXT, context_attribs);
+    if (gl->context == EGL_NO_CONTEXT) fail("eglCreateContext failed");
 
-    EGLint cattr[] = { EGL_CONTEXT_CLIENT_VERSION, 2, EGL_NONE };
-    st->ctx = eglCreateContext(st->egl, cfg, EGL_NO_CONTEXT, cattr);
-    if (st->ctx == EGL_NO_CONTEXT) die("eglCreateContext failed");
-
-    st->egl_window = wl_egl_window_create(st->surface, st->bw, st->bh);
-    st->esurf = eglCreateWindowSurface(st->egl, cfg, (EGLNativeWindowType)st->egl_window, NULL);
-    if (st->esurf == EGL_NO_SURFACE) die("eglCreateWindowSurface failed");
-    eglMakeCurrent(st->egl, st->esurf, st->esurf, st->ctx);
-    eglSwapInterval(st->egl, 0); // paced by frame callbacks instead
-    mark("  context + surface");
+    gl->window = wl_egl_window_create(app.wl.surface, app.width, app.height);
+    gl->surface = eglCreateWindowSurface(gl->display, config, (EGLNativeWindowType)gl->window, NULL);
+    if (gl->surface == EGL_NO_SURFACE) fail("eglCreateWindowSurface failed");
+    eglMakeCurrent(gl->display, gl->surface, gl->surface, gl->context);
+    eglSwapInterval(gl->display, 0); // frame callbacks pace us instead
 
     static const GLfloat quad[] = { -1, -1, 1, -1, -1, 1, 1, 1 };
-    GLuint vbo;
-    glGenBuffers(1, &vbo);
-    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    GLuint buffer;
+    glGenBuffers(1, &buffer);
+    glBindBuffer(GL_ARRAY_BUFFER, buffer);
     glBufferData(GL_ARRAY_BUFFER, sizeof quad, quad, GL_STATIC_DRAW);
     glEnableVertexAttribArray(0);
     glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, 0);
 
-    glGenTextures(1, &st->tex);
-    glBindTexture(GL_TEXTURE_2D, st->tex);
+    glGenTextures(1, &gl->texture);
+    glBindTexture(GL_TEXTURE_2D, gl->texture);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-    glDisable(GL_BLEND); // effect output is premultiplied and drawn once
-    glViewport(0, 0, st->bw, st->bh);
+    glDisable(GL_BLEND); // effects output premultiplied alpha in a single pass
+    glViewport(0, 0, app.width, app.height);
     glClearColor(0, 0, 0, 0);
-
-    if (!load_effect(st)) die("no usable effect");
-    mark("  effect compiled");
 }
 
-// Reads a binary PPM (P6) from grim's stdout straight into the texture.
-static void load_screenshot(FILE *f) {
-    int w, h, maxv;
-    if (fscanf(f, "P6 %d %d %d", &w, &h, &maxv) != 3 || maxv != 255) die("grim did not produce a P6 image");
-    fgetc(f); // single whitespace after maxval
-    size_t n = (size_t)w * h * 3;
-    unsigned char *px = malloc(n);
-    if (!px || fread(px, 1, n, f) != n) die("short read from grim");
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, w, h, 0, GL_RGB, GL_UNSIGNED_BYTE, px);
-    free(px);
+static void destroy_gl(void) {
+    struct gl *gl = &app.gl;
+    eglMakeCurrent(gl->display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+    eglDestroySurface(gl->display, gl->surface);
+    eglDestroyContext(gl->display, gl->context);
+    wl_egl_window_destroy(gl->window);
 }
 
-// ---------------------------------------------------------------- frame loop
+// ---------------------------------------------------------------- screenshot
 
-static void frame_done(void *d, struct wl_callback *cb, uint32_t time);
-static const struct wl_callback_listener frame_listener = { frame_done };
+static FILE *start_screenshot(void) {
+    char *command = format("grim %s -o '%s' -t ppm -", app.opt.cursor ? "-c" : "", app.wl.output->name);
+    FILE *pipe = popen(command, "r");
+    free(command);
+    if (!pipe) fail("cannot run grim");
+    return pipe;
+}
 
-static void draw(struct state *st) {
-    float t = st->t0 == 0 ? 0.f : (float)((now_ms() - st->t0) / st->duration_ms);
-    if (t >= 1.f) {
-        if (!st->loop) {
-            st->done = true;
-            return;
-        }
-        // authoring mode: pick up edits, keep the old program if the new one is broken
-        st->duration_ms = 0;
-        if (!load_effect(st)) st->duration_ms = DEFAULT_DURATION;
-        st->t0 = now_ms();
-        t = 0.f;
-    }
+// Binary PPM straight from grim's stdout into the texture.
+static void upload_screenshot(FILE *pipe) {
+    int width, height, maxval;
+    if (fscanf(pipe, "P6 %d %d %d", &width, &height, &maxval) != 3 || maxval != 255) fail("grim did not produce a P6 image");
+    fgetc(pipe);
+    size_t size = (size_t)width * height * 3;
+    unsigned char *pixels = malloc(size);
+    if (!pixels || fread(pixels, 1, size, pipe) != size) fail("short read from grim");
+    if (pclose(pipe) != 0) fail("grim failed");
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, width, height, 0, GL_RGB, GL_UNSIGNED_BYTE, pixels);
+    free(pixels);
+}
+
+// ---------------------------------------------------------------- frames
+
+static void on_frame(void *data, struct wl_callback *callback, uint32_t time);
+static const struct wl_callback_listener frame_listener = { on_frame };
+
+static float progress(void) {
+    if (!app.started_at) return 0;
+    return (now_ms() - app.started_at) / app.opt.duration_ms;
+}
+
+static void restart_with_fresh_effect(void) {
+    app.opt.duration_ms = 0;
+    if (!load_effect()) app.opt.duration_ms = DEFAULT_DURATION_MS;
+    app.started_at = now_ms();
+}
+
+static void render(float t) {
     glClear(GL_COLOR_BUFFER_BIT);
-    glUniform1f(st->u_time, t);
+    glUniform1f(app.gl.u_time, t);
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
-    struct wl_callback *cb = wl_surface_frame(st->surface);
-    wl_callback_add_listener(cb, &frame_listener, st);
-    eglSwapBuffers(st->egl, st->esurf);
+    wl_callback_add_listener(wl_surface_frame(app.wl.surface), &frame_listener, NULL);
+    eglSwapBuffers(app.gl.display, app.gl.surface);
 }
 
-static void frame_done(void *d, struct wl_callback *cb, uint32_t time) {
-    (void)time;
-    struct state *st = d;
-    wl_callback_destroy(cb);
-    if (st->t0 == 0) { st->t0 = now_ms(); mark("first frame presented"); } // clock starts here
-    draw(st);
+static void on_frame(void *data, struct wl_callback *callback, uint32_t time) {
+    (void)data; (void)time;
+    wl_callback_destroy(callback);
+    if (!app.started_at) app.started_at = now_ms(), trace("first frame presented");
+
+    float t = progress();
+    bool finished = t >= 1;
+    if (finished && !app.opt.loop) {
+        app.wl.closed = true;
+        return;
+    }
+    if (finished) restart_with_fresh_effect(), t = 0;
+    render(t);
 }
 
 // ---------------------------------------------------------------- main
 
-// Double-fork so the command is reparented to init and we never have to reap it.
-static void run_then(const char *cmd) {
-    if (!cmd) return;
-    pid_t pid = fork();
-    if (pid == 0) {
-        if (fork() == 0) {
-            execl("/bin/sh", "sh", "-c", cmd, (char *)NULL);
-            _exit(127);
-        }
-        _exit(0);
-    }
-    if (pid > 0) waitpid(pid, NULL, 0);
-}
-
-static void usage(void) {
-    fprintf(stderr, "usage: hyprtransition [-e EFFECT] [-o OUTPUT] [-d MS] [-s SEED] [-c] [--loop] [--then CMD]\n");
-    exit(2);
-}
-
 int main(int argc, char **argv) {
-    struct state st = { .seed = -1 };
-    t_start = now_ms();
-    debug = getenv("HYPRTRANSITION_DEBUG") != NULL;
-    for (int i = 1; i < argc; i++) {
-        if (!strcmp(argv[i], "-e") && i + 1 < argc) st.effect = argv[++i];
-        else if (!strcmp(argv[i], "-o") && i + 1 < argc) st.out_name = argv[++i];
-        else if (!strcmp(argv[i], "-d") && i + 1 < argc) st.duration_ms = atof(argv[++i]);
-        else if (!strcmp(argv[i], "-s") && i + 1 < argc) st.seed = atof(argv[++i]);
-        else if (!strcmp(argv[i], "-c")) st.cursor = true;
-        else if (!strcmp(argv[i], "--loop")) st.loop = true;
-        else if (!strcmp(argv[i], "--then") && i + 1 < argc) st.then = argv[++i];
-        else usage();
-    }
+    app.tracing = getenv("HYPRTRANSITION_DEBUG") != NULL;
+    app.opt.seed = -1;
+    parse_args(argc, argv);
     srand((unsigned)(now_ms() * 1000) ^ (unsigned)getpid());
-    if (st.seed < 0) st.seed = (float)(rand() % 1000);
-    load_config(&st);
-    if (!st.effect) st.effect = DEFAULT_EFFECT;
-    resolve_effect(&st);
-    char focused[64];
-    if (!st.out_name && focused_output(focused, sizeof focused)) st.out_name = focused;
+    apply_config_file();
+    if (app.opt.seed < 0) app.opt.seed = rand() % 1000;
+    if (!app.opt.output) app.opt.output = focused_output_name();
+    app.effect_path = find_effect(app.opt.effect ? app.opt.effect : DEFAULT_EFFECT);
 
-    st.display = wl_display_connect(NULL);
-    if (!st.display) die("cannot connect to Wayland display");
-    struct wl_registry *reg = wl_display_get_registry(st.display);
-    wl_registry_add_listener(reg, &registry_listener, &st);
-    wl_display_roundtrip(st.display); // globals
-    wl_display_roundtrip(st.display); // output events
-    mark("wayland globals");
-    if (!st.compositor || !st.layer_shell || !st.viewporter) die("compositor lacks wl_compositor/layer-shell/viewporter");
-    if (st.n_outputs == 0) die("no outputs");
+    connect_wayland();
+    app.wl.output = find_output(app.opt.output);
+    FILE *screenshot = start_screenshot(); // grim runs while the overlay is set up
+    create_overlay();
+    trace("overlay configured");
 
-    st.out = &st.outputs[0];
-    if (st.out_name) {
-        st.out = NULL;
-        for (int i = 0; i < st.n_outputs; i++)
-            if (!strcmp(st.outputs[i].name, st.out_name)) st.out = &st.outputs[i];
-        if (!st.out) die("no such output");
-    }
+    init_gl();
+    if (!load_effect()) fail("no usable effect");
+    trace("gl ready");
+    upload_screenshot(screenshot);
+    trace("screenshot uploaded");
 
-    // Kick off the screenshot first; it runs while we set up the overlay.
-    char cmd[256];
-    snprintf(cmd, sizeof cmd, "grim %s -o '%s' -t ppm -", st.cursor ? "-c" : "", st.out->name);
-    FILE *shot = popen(cmd, "r");
-    if (!shot) die("cannot run grim");
+    render(0);
+    wl_display_flush(app.wl.display);
+    trace("first frame committed");
+    if (app.opt.then) run_detached(app.opt.then);
 
-    st.surface = wl_compositor_create_surface(st.compositor);
-    struct wl_region *empty = wl_compositor_create_region(st.compositor);
-    wl_surface_set_input_region(st.surface, empty); // click-through
-    wl_region_destroy(empty);
-    st.viewport = wp_viewporter_get_viewport(st.viewporter, st.surface);
+    while (!app.wl.closed && wl_display_dispatch(app.wl.display) != -1) {}
 
-    st.layer = zwlr_layer_shell_v1_get_layer_surface(st.layer_shell, st.surface, st.out->wl,
-                                                     ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY, NAMESPACE);
-    zwlr_layer_surface_v1_add_listener(st.layer, &layer_listener, &st);
-    zwlr_layer_surface_v1_set_anchor(st.layer, ZWLR_LAYER_SURFACE_V1_ANCHOR_TOP | ZWLR_LAYER_SURFACE_V1_ANCHOR_BOTTOM |
-                                                   ZWLR_LAYER_SURFACE_V1_ANCHOR_LEFT | ZWLR_LAYER_SURFACE_V1_ANCHOR_RIGHT);
-    zwlr_layer_surface_v1_set_exclusive_zone(st.layer, -1);
-    zwlr_layer_surface_v1_set_keyboard_interactivity(st.layer, ZWLR_LAYER_SURFACE_V1_KEYBOARD_INTERACTIVITY_NONE);
-    zwlr_layer_surface_v1_set_size(st.layer, 0, 0);
-    wl_surface_commit(st.surface);
-    while (!st.configured && wl_display_dispatch(st.display) != -1) {}
-    if (st.lw <= 0 || st.lh <= 0) die("compositor gave us no size");
-    mark("layer surface configured");
-
-    // Render at the output's physical resolution so the screenshot is pixel-exact
-    // under fractional scaling; the viewport maps it onto the logical size.
-    bool rotated = st.out->transform & 1;
-    st.bw = rotated ? st.out->mode_h : st.out->mode_w;
-    st.bh = rotated ? st.out->mode_w : st.out->mode_h;
-    if (st.bw <= 0 || st.bh <= 0) { st.bw = st.lw; st.bh = st.lh; }
-    wp_viewport_set_destination(st.viewport, st.lw, st.lh);
-
-    gl_init(&st);
-    mark("egl/gl ready");
-    load_screenshot(shot);
-    if (pclose(shot) != 0) die("grim failed");
-    mark("screenshot uploaded");
-
-    draw(&st); // first frame at t=0, overlay is now mapped
-    wl_display_flush(st.display);
-    mark("first frame committed");
-    run_then(st.then);
-
-    while (!st.done && wl_display_dispatch(st.display) != -1) {}
-
-    eglMakeCurrent(st.egl, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
-    eglDestroySurface(st.egl, st.esurf);
-    eglDestroyContext(st.egl, st.ctx);
-    wl_egl_window_destroy(st.egl_window);
-    zwlr_layer_surface_v1_destroy(st.layer);
-    wl_surface_destroy(st.surface);
-    wl_display_flush(st.display);
-    wl_display_disconnect(st.display);
+    destroy_gl();
+    zwlr_layer_surface_v1_destroy(app.wl.layer);
+    wl_surface_destroy(app.wl.surface);
+    wl_display_disconnect(app.wl.display);
     return 0;
 }
