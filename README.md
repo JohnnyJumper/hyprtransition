@@ -155,8 +155,9 @@ hyprtransition [-e EFFECT] [-o OUTPUT] [-d MS] [-s SEED] [-c] [--loop] [--then C
 
 ## Notes
 
-- Startup cost is one EGL context per switch: ~10 ms on Mesa, ~60 ms on the
-  NVIDIA driver. Effects start after that; the switch is never delayed.
+- Startup cost is creating one EGL context per switch: ~60 ms on the NVIDIA
+  driver in testing (other drivers are usually quicker). The effect starts
+  after that; the switch itself is never delayed by more than the overlay setup.
 - Fractional scaling and rotated monitors are handled (the overlay renders at
   the physical resolution and is pixel-exact).
 - With split-monitor-workspaces, `workspaces` must match the plugin's `count`.
