@@ -2,8 +2,8 @@
 
 Shader-driven workspace transitions for [Hyprland](https://hyprland.org).
 When you switch workspaces, the old screen tears in half and falls away,
-burns up like paper, shatters into spinning tiles — or does whatever you
-write in a ~30-line GLSL file.
+burns up like paper, gets sucked into a black hole, turns like a book page,
+squashes like a cartoon — or does whatever you write in a ~30-line GLSL file.
 
 Purely cosmetic and fully decoupled: it knows nothing about your keys, your
 workspace layout or your plugins. It reacts to the workspace *changing* —
@@ -76,7 +76,7 @@ Start from the example: `mkdir -p ~/.config/hyprtransition && cp ~/.local/share/
 
 ```lua
 return {
-    effect = "tear",                 -- or a list: { "tear", "burn", "tiles" } → one at random per switch
+    effect = "tear",                 -- or a list: { "tear", "burn", "blackhole" } → one at random per switch
     duration = nil,                  -- ms; nil = each effect file's own "// duration:" line
     cursor = false,                  -- include the mouse cursor in the captured screen
 
@@ -112,6 +112,11 @@ bind = ALT, 2, exec, hyprtransition -e tear --then "hyprctl dispatch workspace 2
 | `tear`  | a glowing crack races down the middle, the halves tip outward and fall away |
 | `burn`  | the screen burns away like paper, embers glowing along the front |
 | `tiles` | the screen breaks into tiles that spin and shrink away, rippling out from a random point |
+| `blackhole` | the screen twists and is sucked into a singularity, revealing the new workspace from the edges in |
+| `page` | the old workspace turns like a book page, its back folding over, casting a shadow on the new one |
+| `squash` | cartoon squash & stretch: a little hop, then the screen pancakes to the floor and pops |
+| `glitch` | displaced scanlines with RGB split, then blocks drop out until nothing is left |
+| `melt` | the screen sags and drips down like hot wax, uncovering the new workspace from the top |
 
 Try any of them without configuring anything:
 
