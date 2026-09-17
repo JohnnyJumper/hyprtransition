@@ -13,8 +13,8 @@
 //
 //   hyprtransition [-e EFFECT] [-o OUTPUT] [-d MS] [-s SEED] [-c] [--loop] [--then CMD]
 //
-//   Defaults for -e, -d and -c can be set in $XDG_CONFIG_HOME/hyprtransition/config
-//   (see config.example); flags override the file.
+//   Defaults for -e, -d and -c can be set in $XDG_CONFIG_HOME/hyprtransition/config.lua
+//   (see config.example.lua); flags override the file.
 //
 //   -e EFFECT   effect name or a path to a .glsl file. Default: tear. Names are
 //               looked up, in order, in $HYPRTRANSITION_EFFECTS,
@@ -47,6 +47,9 @@
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
 #include <GLES2/gl2.h>
+#include <lauxlib.h>
+#include <lua.h>
+#include <lualib.h>
 #include <wayland-client.h>
 #include <wayland-egl.h>
 
@@ -186,45 +189,51 @@ static void config_dir(char *out, size_t n) {
     else out[0] = 0;
 }
 
-static char *trim(char *s) {
-    while (*s == ' ' || *s == '\t') s++;
-    char *e = s + strlen(s);
-    while (e > s && (e[-1] == ' ' || e[-1] == '\t' || e[-1] == '\n' || e[-1] == '\r')) *--e = 0;
-    return s;
-}
-
-// "a, b, c" -> one of them at random (the Lua module does the same when it drives us)
-static const char *pick_from_list(const char *list) {
-    int n = 1;
-    for (const char *p = list; *p; p++) n += *p == ',';
-    int want = rand() % n;
-    char *copy = strdup(list), *tok = strtok(copy, ",");
-    for (int i = 0; tok && i < want; i++) tok = strtok(NULL, ",");
-    return tok ? strdup(trim(tok)) : list;
-}
-
-// Reads `key = value` lines; only fills in what the command line did not set.
+// Evaluates config.lua and takes effect / duration / cursor from the returned
+// table, only where the command line did not set them. Same file the Lua
+// module reads, so both halves agree.
 static void load_config(struct state *st) {
     char dir[1024], path[1100];
     config_dir(dir, sizeof dir);
     if (!dir[0]) return;
-    snprintf(path, sizeof path, "%s/config", dir);
-    FILE *f = fopen(path, "r");
-    if (!f) return;
-    char line[512];
-    while (fgets(line, sizeof line, f)) {
-        char *k = trim(line);
-        if (*k == '#' || !*k) continue;
-        char *eq = strchr(k, '=');
-        if (!eq) continue;
-        *eq = 0;
-        k = trim(k);
-        char *v = trim(eq + 1);
-        if (!strcmp(k, "effect") && !st->effect) st->effect = pick_from_list(v);
-        else if (!strcmp(k, "duration") && st->duration_ms <= 0) st->duration_ms = atof(v);
-        else if (!strcmp(k, "cursor") && !st->cursor) st->cursor = !strcmp(v, "true") || !strcmp(v, "1");
+    snprintf(path, sizeof path, "%s/config.lua", dir);
+    if (access(path, R_OK) != 0) return;
+
+    lua_State *L = luaL_newstate();
+    luaL_openlibs(L);
+    if (luaL_dofile(L, path) != LUA_OK) {
+        fprintf(stderr, "hyprtransition: %s\n", lua_tostring(L, -1));
+        lua_close(L);
+        return;
     }
-    fclose(f);
+    if (!lua_istable(L, -1)) {
+        fprintf(stderr, "hyprtransition: %s must `return { ... }`\n", path);
+        lua_close(L);
+        return;
+    }
+
+    if (!st->effect) {
+        lua_getfield(L, -1, "effect");
+        if (lua_isstring(L, -1)) {
+            st->effect = strdup(lua_tostring(L, -1));
+        } else if (lua_istable(L, -1) && lua_rawlen(L, -1) > 0) { // a list: pick one at random
+            lua_rawgeti(L, -1, 1 + rand() % (int)lua_rawlen(L, -1));
+            if (lua_isstring(L, -1)) st->effect = strdup(lua_tostring(L, -1));
+            lua_pop(L, 1);
+        }
+        lua_pop(L, 1);
+    }
+    if (st->duration_ms <= 0) {
+        lua_getfield(L, -1, "duration");
+        if (lua_isnumber(L, -1)) st->duration_ms = lua_tonumber(L, -1);
+        lua_pop(L, 1);
+    }
+    if (!st->cursor) {
+        lua_getfield(L, -1, "cursor");
+        st->cursor = lua_toboolean(L, -1);
+        lua_pop(L, 1);
+    }
+    lua_close(L);
 }
 
 // ---------------------------------------------------------------- effect files

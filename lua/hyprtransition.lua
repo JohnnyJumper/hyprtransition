@@ -7,10 +7,10 @@
 --     -- user install (nothing is placed in ~/.config/hypr, so load it by path):
 --     dofile(os.getenv("HOME") .. "/.local/share/hyprtransition/hyprtransition.lua").setup()
 --
--- Settings come from ~/.config/hyprtransition/config (see config.example);
+-- Settings come from ~/.config/hyprtransition/config.lua (see config.example.lua);
 -- anything passed to setup({ ... }) overrides the file, e.g. setup({ effect = "burn" }).
 -- Remove that line to turn it off. All options and their defaults are in
--- `defaults` below. The module takes over `mod + 1..workspaces` and
+-- `defaults` below. The module takes over `keys.mod + 1..keys.workspaces` and
 -- `mod + 0` / `mod + 9` (next/prev), hides the overlay from your layer
 -- animations, and disables the built-in `workspaces` animation (the effect
 -- replaces it). The workspace switch itself is whatever you already use:
@@ -49,40 +49,38 @@ local function config_dir()
 	return (os.getenv("HOME") or "~") .. "/.config/hyprtransition"
 end
 
-local function parse_value(key, v)
-	if key == "effect" and v:find(",") then
-		local list = {}
-		for item in v:gmatch("[^,]+") do
-			list[#list + 1] = item:match("^%s*(.-)%s*$")
-		end
-		return list
-	end
-	if v == "true" then
-		return true
-	elseif v == "false" then
-		return false
-	end
-	return tonumber(v) or v
-end
-
--- `key = value` lines; unknown keys are kept too, so effects can grow their own later
+-- config.lua must `return { ... }`; a broken file is reported as a notification
+-- and ignored rather than breaking your whole Hyprland config.
 local function read_config()
-	local cfg = {}
-	local f = io.open(config_dir() .. "/config", "r")
+	local path = config_dir() .. "/config.lua"
+	local f = io.open(path, "r")
 	if not f then
-		return cfg
-	end
-	for raw in f:lines() do
-		local line = raw:match("^%s*(.-)%s*$")
-		if line ~= "" and line:sub(1, 1) ~= "#" then
-			local k, v = line:match("^([%w_]+)%s*=%s*(.-)$")
-			if k then
-				cfg[k] = parse_value(k, v)
-			end
-		end
+		return {}
 	end
 	f:close()
+	local ok, cfg = pcall(dofile, path)
+	if not ok or type(cfg) ~= "table" then
+		hl.notification.create({
+			text = "hyprtransition: " .. (ok and (path .. " must return a table") or tostring(cfg)),
+			timeout = 8000,
+			color = "rgb(ff5555)",
+		})
+		return {}
+	end
 	return cfg
+end
+
+-- one level deep, so `keys = { mod = "SUPER" }` keeps the other key defaults
+local function merge(into, from)
+	for k, v in pairs(from) do
+		if type(v) == "table" and type(into[k]) == "table" then
+			for k2, v2 in pairs(v) do
+				into[k][k2] = v2
+			end
+		else
+			into[k] = v
+		end
+	end
 end
 
 -- ---------------------------------------------------------------- backend
@@ -121,7 +119,7 @@ end
 
 local function target_id(mon, i)
 	if smw then
-		return mon.id * M.workspaces + i
+		return mon.id * M.keys.workspaces + i
 	end
 	return i
 end
@@ -151,6 +149,9 @@ local function with_effect(action)
 	local cmd = string.format("%s -e %s -o %s", M.bin, pick_effect(), mon.name)
 	if M.duration then
 		cmd = cmd .. " -d " .. M.duration
+	end
+	if M.cursor then
+		cmd = cmd .. " -c"
 	end
 	hl.exec_cmd(cmd)
 
@@ -196,15 +197,10 @@ local function rebind(key, fn)
 end
 
 function M.setup(opts)
-	for k, v in pairs(defaults) do
-		M[k] = v
-	end
-	for k, v in pairs(read_config()) do
-		M[k] = v
-	end
-	for k, v in pairs(opts or {}) do
-		M[k] = v
-	end
+	M.keys = {}
+	merge(M, defaults)
+	merge(M, read_config())
+	merge(M, opts or {})
 
 	hl.layer_rule({
 		name = "hyprtransition-noanim",
@@ -227,16 +223,16 @@ function M.setup(opts)
 		end
 	end)
 
-	if M.bind_keys then
-		for i = 1, M.workspaces do
-			rebind(M.mod .. " + " .. i, function()
+	if M.keys.bind then
+		for i = 1, M.keys.workspaces do
+			rebind(M.keys.mod .. " + " .. i, function()
 				M.go(i)
 			end)
 		end
-		rebind(M.mod .. " + 0", function()
+		rebind(M.keys.mod .. " + 0", function()
 			M.cycle("next")
 		end)
-		rebind(M.mod .. " + 9", function()
+		rebind(M.keys.mod .. " + 9", function()
 			M.cycle("prev")
 		end)
 	end

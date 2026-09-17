@@ -28,9 +28,9 @@ compositor patching, nothing that breaks on Hyprland updates.
 
 - Hyprland ≥ 0.56 with the Lua config (`hyprland.lua`) for the key integration.
   The binary itself works with the classic `hyprland.conf` too, see below.
-- `grim`
+- `grim`, `lua` (5.4 or 5.5; used to read `config.lua`)
 - build: a C compiler, `pkg-config`, `wayland-protocols`, and dev headers for
-  `wayland-client`, `wayland-egl`, `egl`, `glesv2`
+  `wayland-client`, `wayland-egl`, `egl`, `glesv2`, `lua`
 
 ## Install
 
@@ -64,37 +64,36 @@ hyprtransition only reads it, never creates it:
 
 ```
 ~/.config/hyprtransition/
-├── config        your settings, key = value  (optional; every key has a default)
+├── config.lua    your settings  (optional; every field has a default)
 └── effects/      your own effects; a file with a bundled effect's name overrides it
 ```
 
-Start from the example: `mkdir -p ~/.config/hyprtransition && cp ~/.local/share/hyprtransition/config.example ~/.config/hyprtransition/config`
-(`/usr/share/hyprtransition/config.example` for a system install).
+Start from the example: `mkdir -p ~/.config/hyprtransition && cp ~/.local/share/hyprtransition/config.example.lua ~/.config/hyprtransition/config.lua`
+(`/usr/share/hyprtransition/config.example.lua` for a system install).
 
-```ini
-effect = tear                # or a list: tear, burn, tiles  → one at random per switch
-# duration = 700             # ms; unset = the effect file's own "// duration:" line
-cursor = false               # include the mouse cursor in the captured screen
+```lua
+return {
+    effect = "tear",                 -- or a list: { "tear", "burn", "tiles" } → one at random per switch
+    duration = nil,                  -- ms; nil = each effect file's own "// duration:" line
+    cursor = false,                  -- include the mouse cursor in the captured screen
 
-# Lua module only
-mod = ALT                    # binds mod+1..workspaces, mod+0 = next, mod+9 = prev
-workspaces = 5
-bind_keys = true             # false: keep your binds, call HyprTransition.go(i) yourself
-fallback_ms = 400            # if the overlay never appears, switch anyway after this
-disable_workspace_animation = true   # the effect replaces Hyprland's slide
-# bin = /path/to/hyprtransition      # if it isn't on your PATH
+    keys = {                         -- Lua module only
+        mod = "ALT",                 -- binds mod+1..workspaces, mod+0 = next, mod+9 = prev
+        workspaces = 5,
+        bind = true,                 -- false: keep your binds, call HyprTransition.go(i) yourself
+    },
+    fallback_ms = 400,               -- if the overlay never appears, switch anyway after this
+    disable_workspace_animation = true,  -- the effect replaces Hyprland's slide
+    bin = "hyprtransition",          -- if it isn't on your PATH
+}
 ```
 
-The binary reads `effect`, `duration` and `cursor` (so `hyprland.conf` users get
-them too); the Lua module reads all of them. Precedence: built-in defaults <
-config file < `setup({ ... })` arguments / command-line flags.
-
-Change things at runtime, from a bind or a terminal:
-
-```sh
-hyprctl dispatch '(function() HyprTransition.enabled = not HyprTransition.enabled return hl.dsp.no_op() end)()'
-hyprctl dispatch '(function() HyprTransition.effect = "burn" return hl.dsp.no_op() end)()'
-```
+It's plain Lua, so it can compute: `effect = os.getenv("HOSTNAME") == "laptop" and "fade" or "tear"`.
+The binary evaluates it too (`effect`, `duration`, `cursor`), so `hyprland.conf`
+users and terminal runs get the same defaults. Precedence: built-in defaults <
+`config.lua` < `setup({ ... })` arguments / command-line flags. A broken file is
+reported (as a Hyprland notification from the module, on stderr from the
+binary) and ignored, so it can never break your Hyprland config.
 
 ### Classic `hyprland.conf`
 

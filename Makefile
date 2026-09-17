@@ -14,7 +14,9 @@ DESTDIR ?=
 CC      ?= cc
 CFLAGS  ?= -O2
 CFLAGS  += -Wall -Wextra -DDATADIR='"$(DATADIR)"'
-PKGS     = wayland-client wayland-egl egl glesv2
+# whichever Lua pkg-config name this distro uses (Hyprland embeds 5.5; 5.4 works too)
+LUA_PKG ?= $(shell for p in lua5.5 lua-5.5 lua lua5.4 lua-5.4; do pkg-config --exists $$p && echo $$p && break; done)
+PKGS     = wayland-client wayland-egl egl glesv2 $(LUA_PKG)
 LDLIBS  += $(shell pkg-config --libs $(PKGS)) -lm
 CFLAGS  += $(shell pkg-config --cflags $(PKGS))
 
@@ -46,7 +48,7 @@ install: build/hyprtransition
 	install -Dm755 build/hyprtransition $(DESTDIR)$(BINDIR)/hyprtransition
 	install -Dm644 lua/hyprtransition.lua $(DESTDIR)$(LUADIR)/hyprtransition.lua
 	install -Dm644 -t $(DESTDIR)$(DATADIR)/effects effects/*.glsl
-	install -Dm644 config.example $(DESTDIR)$(DATADIR)/config.example
+	install -Dm644 config.example.lua $(DESTDIR)$(DATADIR)/config.example.lua
 
 uninstall:
 	rm -f $(DESTDIR)$(BINDIR)/hyprtransition $(DESTDIR)$(LUADIR)/hyprtransition.lua
@@ -59,12 +61,12 @@ install-user: build/hyprtransition
 	install -Dm755 build/hyprtransition $(HOME)/.local/bin/hyprtransition
 	install -Dm644 lua/hyprtransition.lua $(USER_DATA)/hyprtransition.lua
 	install -Dm644 -t $(USER_DATA)/effects effects/*.glsl
-	install -Dm644 config.example $(USER_DATA)/config.example
+	install -Dm644 config.example.lua $(USER_DATA)/config.example.lua
 	@echo
 	@echo "Installed. Add to the end of your hyprland.lua:"
 	@echo '  dofile(os.getenv("HOME") .. "/.local/share/hyprtransition/hyprtransition.lua").setup()'
 	@echo "Settings (optional):"
-	@echo '  mkdir -p ~/.config/hyprtransition && cp $(USER_DATA)/config.example ~/.config/hyprtransition/config'
+	@echo '  mkdir -p ~/.config/hyprtransition && cp $(USER_DATA)/config.example.lua ~/.config/hyprtransition/config.lua'
 
 uninstall-user:
 	rm -f $(HOME)/.local/bin/hyprtransition
